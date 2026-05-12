@@ -1,0 +1,13 @@
+.git
+.DS_Store
+**/.DS_Store
+**/.pytest_cache
+**/__pycache__
+**/*.pyc
+**/.venv
+games/calendar/results
+games/calendar/tasks/results
+games/calendar/analysis/outputs
+games/calendar/analysis/outcomes
+games/calendar/analysis/figures
+shared-traces

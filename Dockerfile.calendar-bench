@@ -1,0 +1,26 @@
+FROM python:3.11-slim
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    UV_LINK_MODE=copy
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        ca-certificates \
+        curl \
+        git \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN pip install --no-cache-dir uv
+
+WORKDIR /app
+
+COPY a2a-engine ./a2a-engine
+COPY expt-runner ./expt-runner
+COPY games/calendar ./games/calendar
+
+WORKDIR /app/games/calendar
+
+RUN uv sync --frozen
+
+ENTRYPOINT ["/app/games/calendar/.venv/bin/python", "run.py"]

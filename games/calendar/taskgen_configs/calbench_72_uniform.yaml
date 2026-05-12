@@ -1,0 +1,20 @@
+setting_name: calbench_72_uniform_5a3p
+description: >
+  Uniform-cost half of the 72-task CalBench configuration: 5 agents, 3
+  participants per meeting, 5 meetings, 3 density settings, and 4 tasks from
+  each easy/medium/hard bucket per density.
+output: tasks/calbench_72_uniform.jsonl
+summary_output: tasks/calbench_72_uniform_summary.json
+seed_base: 320000
+candidates_per_config: 100
+selected_per_bucket: 4
+difficulty_scorer: optimal_cost_per_participant_slot
+configs:
+  - total_agents: 5
+    subset_size: 3
+    num_slots: 16
+    num_meetings: 5
+    densities: [0.6, 0.8, 1.0]
+    pref_level: 1
+    meeting_cost_level: 1
+    errand_cost_level: 1

@@ -1,0 +1,20 @@
+setting_name: calbench_72_varied_5a3p
+description: >
+  Varied-cost half of the 72-task CalBench configuration: the same 5-agent,
+  3-participant, 5-meeting grid as the uniform suite, with each agent receiving
+  a balanced mix of errand costs 1, 100, and 1000.
+output: tasks/calbench_72_varied.jsonl
+summary_output: tasks/calbench_72_varied_summary.json
+seed_base: 420000
+candidates_per_config: 100
+selected_per_bucket: 4
+difficulty_scorer: optimal_cost_per_participant_slot
+configs:
+  - total_agents: 5
+    subset_size: 3
+    num_slots: 16
+    num_meetings: 5
+    densities: [0.6, 0.8, 1.0]
+    pref_level: 3
+    meeting_cost_level: 1
+    errand_cost_values: [1, 100, 1000]

@@ -1,0 +1,65 @@
+# Python
+**/__pycache__/
+**/*.py[cod]
+**/*.pyo
+**/*.pyd
+**/*.egg-info/
+**/*.egg
+**/dist/
+**/build/
+**/.eggs/
+
+# Virtual environments (uv / venv)
+**/.venv/
+**/venv/
+**/.python-version
+
+# uv cache
+.uv/
+
+# Environment & secrets
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+.olauth
+**/.olauth
+**/.olignore.local
+
+# Experiment results & outputs
+games/*/results/
+games/*/outputs/
+expt-runner/results/
+expt-runner/outputs/
+**/traces/
+shared-traces/
+games/calendar/results/
+games/calendar/tasks/results/
+games/calendar/analysis/outputs/
+games/calendar/analysis/outcomes/
+games/calendar/analysis/figures/
+games/calendar/analysis/outputs/**/gepa_state.bin
+**/*.jsonl
+!games/calendar/tasks/*.jsonl
+
+# Langfuse / OTel local caches
+**/.langfuse_cache/
+**/langfuse_cache/
+
+# macOS
+.DS_Store
+**/.DS_Store
+
+# IDEs
+.idea/
+.vscode/
+*.iml
+
+# Node (a2a-viewer)
+node_modules/
+dist/
+.parcel-cache/
+
+# Jupyter
+**/.ipynb_checkpoints/

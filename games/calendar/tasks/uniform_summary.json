@@ -1,0 +1,203 @@
+{
+  "bucket_counts": {
+    "easy": 36,
+    "hard": 36,
+    "medium": 36
+  },
+  "candidates_per_config": 100,
+  "configs": [
+    {
+      "candidate_difficulty_score_degenerate": false,
+      "candidate_difficulty_score_max": 0.4,
+      "candidate_difficulty_score_min": 0.0,
+      "candidate_optimal_cost_max": 4,
+      "candidate_optimal_cost_min": 0,
+      "candidate_optimal_evictions_max": 8,
+      "candidate_optimal_evictions_min": 0,
+      "density": 0.6,
+      "meeting_cost_level": 1,
+      "pref_level": 1,
+      "selected": {
+        "easy": 4,
+        "hard": 4,
+        "medium": 4
+      },
+      "subset_size": 2,
+      "total_agents": 2
+    },
+    {
+      "candidate_difficulty_score_degenerate": false,
+      "candidate_difficulty_score_max": 0.5,
+      "candidate_difficulty_score_min": 0.0,
+      "candidate_optimal_cost_max": 5,
+      "candidate_optimal_cost_min": 0,
+      "candidate_optimal_evictions_max": 9,
+      "candidate_optimal_evictions_min": 0,
+      "density": 0.8,
+      "meeting_cost_level": 1,
+      "pref_level": 1,
+      "selected": {
+        "easy": 4,
+        "hard": 4,
+        "medium": 4
+      },
+      "subset_size": 2,
+      "total_agents": 2
+    },
+    {
+      "candidate_difficulty_score_degenerate": false,
+      "candidate_difficulty_score_max": 0.5,
+      "candidate_difficulty_score_min": 0.1,
+      "candidate_optimal_cost_max": 5,
+      "candidate_optimal_cost_min": 1,
+      "candidate_optimal_evictions_max": 9,
+      "candidate_optimal_evictions_min": 1,
+      "density": 1.0,
+      "meeting_cost_level": 1,
+      "pref_level": 1,
+      "selected": {
+        "easy": 4,
+        "hard": 4,
+        "medium": 4
+      },
+      "subset_size": 2,
+      "total_agents": 2
+    },
+    {
+      "candidate_difficulty_score_degenerate": false,
+      "candidate_difficulty_score_max": 0.26666666666666666,
+      "candidate_difficulty_score_min": 0.0,
+      "candidate_optimal_cost_max": 4,
+      "candidate_optimal_cost_min": 0,
+      "candidate_optimal_evictions_max": 7,
+      "candidate_optimal_evictions_min": 0,
+      "density": 0.6,
+      "meeting_cost_level": 1,
+      "pref_level": 1,
+      "selected": {
+        "easy": 4,
+        "hard": 4,
+        "medium": 4
+      },
+      "subset_size": 3,
+      "total_agents": 5
+    },
+    {
+      "candidate_difficulty_score_degenerate": false,
+      "candidate_difficulty_score_max": 0.5333333333333333,
+      "candidate_difficulty_score_min": 0.26666666666666666,
+      "candidate_optimal_cost_max": 8,
+      "candidate_optimal_cost_min": 4,
+      "candidate_optimal_evictions_max": 12,
+      "candidate_optimal_evictions_min": 4,
+      "density": 0.8,
+      "meeting_cost_level": 1,
+      "pref_level": 1,
+      "selected": {
+        "easy": 4,
+        "hard": 4,
+        "medium": 4
+      },
+      "subset_size": 3,
+      "total_agents": 5
+    },
+    {
+      "candidate_difficulty_score_degenerate": false,
+      "candidate_difficulty_score_max": 0.5333333333333333,
+      "candidate_difficulty_score_min": 0.26666666666666666,
+      "candidate_optimal_cost_max": 8,
+      "candidate_optimal_cost_min": 4,
+      "candidate_optimal_evictions_max": 11,
+      "candidate_optimal_evictions_min": 4,
+      "density": 1.0,
+      "meeting_cost_level": 1,
+      "pref_level": 1,
+      "selected": {
+        "easy": 4,
+        "hard": 4,
+        "medium": 4
+      },
+      "subset_size": 3,
+      "total_agents": 5
+    },
+    {
+      "candidate_difficulty_score_degenerate": false,
+      "candidate_difficulty_score_max": 0.4,
+      "candidate_difficulty_score_min": 0.04,
+      "candidate_optimal_cost_max": 10,
+      "candidate_optimal_cost_min": 1,
+      "candidate_optimal_evictions_max": 19,
+      "candidate_optimal_evictions_min": 2,
+      "density": 0.6,
+      "meeting_cost_level": 1,
+      "pref_level": 1,
+      "selected": {
+        "easy": 4,
+        "hard": 4,
+        "medium": 4
+      },
+      "subset_size": 5,
+      "total_agents": 5
+    },
+    {
+      "candidate_difficulty_score_degenerate": false,
+      "candidate_difficulty_score_max": 0.44,
+      "candidate_difficulty_score_min": 0.24,
+      "candidate_optimal_cost_max": 11,
+      "candidate_optimal_cost_min": 6,
+      "candidate_optimal_evictions_max": 21,
+      "candidate_optimal_evictions_min": 8,
+      "density": 0.8,
+      "meeting_cost_level": 1,
+      "pref_level": 1,
+      "selected": {
+        "easy": 4,
+        "hard": 4,
+        "medium": 4
+      },
+      "subset_size": 5,
+      "total_agents": 5
+    },
+    {
+      "candidate_difficulty_score_degenerate": false,
+      "candidate_difficulty_score_max": 0.48,
+      "candidate_difficulty_score_min": 0.24,
+      "candidate_optimal_cost_max": 12,
+      "candidate_optimal_cost_min": 6,
+      "candidate_optimal_evictions_max": 19,
+      "candidate_optimal_evictions_min": 8,
+      "density": 1.0,
+      "meeting_cost_level": 1,
+      "pref_level": 1,
+      "selected": {
+        "easy": 4,
+        "hard": 4,
+        "medium": 4
+      },
+      "subset_size": 5,
+      "total_agents": 5
+    }
+  ],
+  "degenerate_config_count": 0,
+  "difficulty_bucket_scope": "config_relative_tertile",
+  "difficulty_score_definition": "optimal total move cost divided by total participant-slots across all meetings",
+  "difficulty_score_max": 0.4,
+  "difficulty_score_min": 0.0,
+  "difficulty_scorer": "optimal_cost_per_participant_slot",
+  "errand_cost_range": [
+    1,
+    1
+  ],
+  "meeting_cost_range": [
+    1,
+    1
+  ],
+  "num_meetings": 5,
+  "pref_levels": [
+    1
+  ],
+  "selected_per_bucket": 4,
+  "setting": "uniform_full",
+  "total_configs": 9,
+  "total_tasks": 108
+}
