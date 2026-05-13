@@ -23,6 +23,7 @@ def generate_scenario(
     errand_cost_multiplier: int = 1,
     errand_cost_level: int | None = None,
     meeting_cost_level: int = 1,
+    agent_densities: list[float] | dict[int | str, float] | None = None,
 ) -> ScenarioDict:
     """Generate a scenario with guaranteed feasible meeting assignments.
 
@@ -33,6 +34,7 @@ def generate_scenario(
     """
     if not 0 <= density <= 1:
         raise ValueError("density must be between 0 and 1")
+    density_by_agent = _normalize_agent_densities(agent_densities, num_agents, density)
     if num_meetings > num_slots:
         raise ValueError("num_meetings cannot exceed num_slots for one-slot MVP meetings")
     if pref_level < 1:
@@ -105,7 +107,7 @@ def generate_scenario(
         # slot to move to; meetings with no errand at their witness slot need none.
         # Tight constraint: k + e <= num_slots, so num_absorbing = min(k, e).
         k = len(witness_slots)
-        target_errands = min(round(num_slots * density), num_slots - k)
+        target_errands = min(round(num_slots * density_by_agent[agent_id]), num_slots - k)
         num_absorbing = min(k, target_errands)
         absorbing_slots: set[int] = set()
         non_witness = [slot for slot in range(num_slots) if slot not in witness_slots]
@@ -134,6 +136,8 @@ def generate_scenario(
         "seed": seed,
         "num_agents": num_agents,
         "num_slots": num_slots,
+        "density": density,
+        "agent_densities": density_by_agent,
         "errand_cost_multiplier": errand_cost_multiplier,
         "calendars": calendars,
         "meetings": meetings,
@@ -154,3 +158,24 @@ def generate_scenario(
     scenario["greedy"] = solve_greedy(calendars, meetings, num_slots)
     scenario["feasible"] = True if skip_optimal else scenario["optimal"].get("cost") is not None
     return scenario
+
+
+def _normalize_agent_densities(
+    agent_densities: list[float] | dict[int | str, float] | None,
+    num_agents: int,
+    default_density: float,
+) -> list[float]:
+    if agent_densities is None:
+        return [float(default_density)] * num_agents
+    if isinstance(agent_densities, dict):
+        densities = [
+            float(agent_densities.get(agent_id, agent_densities.get(str(agent_id), default_density)))
+            for agent_id in range(num_agents)
+        ]
+    else:
+        if len(agent_densities) != num_agents:
+            raise ValueError("agent_densities length must match num_agents")
+        densities = [float(value) for value in agent_densities]
+    if any(value < 0 or value > 1 for value in densities):
+        raise ValueError("agent_densities values must be between 0 and 1")
+    return densities

@@ -171,6 +171,25 @@ Agent types:
 | `llm` | standard prompt with provider-backed LLM calls |
 | `dspy` | prompt-variant-backed LLM client |
 
+Mixed-team and protocol knobs:
+
+```yaml
+defaults:
+  game_name: calendar
+  num_agents: 3
+  communication_protocol: groupchat   # dm, groupchat, or dm_and_groupchat
+  agent_densities: [0.2, 0.6, 0.9]    # optional per-agent calendar density
+  agents:
+    - {type: llm, model: gpt-4o-mini}
+    - {type: llm, model: claude-sonnet-4-5-20250929}
+    - {type: dsm}
+```
+
+Traces record `team_model_counts`, `is_heterogeneous_team`,
+`representation_elo_by_agent`, and per-agent `contribution_scores`. The agent
+CSV export includes `contribution_score`, `density_adjusted_contribution_score`,
+`calendar_density`, and `representation_elo`.
+
 Provider credentials:
 
 | Provider | Model examples | Credential |
@@ -242,8 +261,8 @@ Key evaluation columns:
 
 - `coordination_rate`: scheduled meetings divided by attempted meetings
 - `realized_cost`, `optimal_cost`, `excess_cost`, `cost_ratio`
-- `total_dms`, `msgs_per_meeting`, `dm_chars_per_meeting`
-- `cost_gini`, `fairness_metric`, and per-agent `cost_share`
+- `total_dms`, `total_groupchat_messages`, `msgs_per_meeting`, `dm_chars_per_meeting`
+- `cost_gini`, `fairness_metric`, per-agent `cost_share`, and contribution columns
 
 Reusable paper-analysis scripts live in `analysis/scripts/`.
 

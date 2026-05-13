@@ -50,6 +50,7 @@ class CalendarGameConfig(GameConfigBase):
     num_agents: int = 2
     num_slots: int = 16
     density: float = 0.5
+    agent_densities: list[float] | dict[int, float] | dict[str, float] | None = None
     pref_level: int = 1
     num_meetings: int = 1
     num_participants: int | None = None  # agents per meeting; None means all agents participate
@@ -60,6 +61,7 @@ class CalendarGameConfig(GameConfigBase):
     meeting_cost_level: int = 1
     enable_fallback: bool = True
     fallback_max_depth: int = 3
+    communication_protocol: str = "dm"
     task_path: str | None = None
     task_id: str | None = None
     dsm_num_proposals: int = 4
@@ -76,6 +78,8 @@ class CalendarGameConfig(GameConfigBase):
     dsm_privacy_unit_cost: float = 1.0
     dsm_initial_budget: int = 100
     sd_model: dict[int, float] = Field(default_factory=dict)
+    representation_elo_base: float = 1500.0
+    representation_elo_scale: float = 400.0
 
 
 # ---------------------------------------------------------------------------
@@ -278,6 +282,74 @@ class CalendarGame:
                 actions.append(tool)
         return actions
 
+    def _communication_protocol(self) -> str:
+        protocol = str(self.config.communication_protocol or "dm").lower()
+        aliases = {
+            "direct": "dm",
+            "direct_message": "dm",
+            "group": "groupchat",
+            "group_chat": "groupchat",
+            "both": "dm_and_groupchat",
+            "mixed": "dm_and_groupchat",
+        }
+        protocol = aliases.get(protocol, protocol)
+        if protocol not in {"dm", "groupchat", "dm_and_groupchat"}:
+            raise ValueError(
+                "communication_protocol must be one of: dm, groupchat, dm_and_groupchat"
+            )
+        return protocol
+
+    def _allows_dm(self) -> bool:
+        return self._communication_protocol() in {"dm", "dm_and_groupchat"}
+
+    def _allows_groupchat(self) -> bool:
+        return self._communication_protocol() in {"groupchat", "dm_and_groupchat"}
+
+    def _agent_spec_for(self, agent_id: int) -> dict:
+        if agent_id < len(self.config.agents):
+            spec = self.config.agents[agent_id]
+            return spec.model_dump() if hasattr(spec, "model_dump") else dict(spec)
+        return {"type": "llm", "model": "gpt-4o-mini"}
+
+    def _agent_team_metadata(self) -> dict:
+        specs = [self._agent_spec_for(agent_id) for agent_id in range(self.config.num_agents)]
+        models = [str(spec.get("model") or spec.get("type") or "unknown") for spec in specs]
+        types = [str(spec.get("type") or "unknown") for spec in specs]
+        model_counts: dict[str, int] = {}
+        for model in models:
+            model_counts[model] = model_counts.get(model, 0) + 1
+        return {
+            "agent_models": models,
+            "agent_types": types,
+            "team_model_counts": model_counts,
+            "team_model_label": " vs ".join(dict.fromkeys(models)),
+            "is_heterogeneous_team": len(set(models)) > 1 or len(set(types)) > 1,
+        }
+
+    @staticmethod
+    def _actual_calendar_densities(calendars: list[list[object]]) -> list[float]:
+        densities: list[float] = []
+        for calendar in calendars:
+            if not calendar:
+                densities.append(0.0)
+                continue
+            occupied = sum(1 for slot in calendar if slot is not None)
+            densities.append(occupied / len(calendar))
+        return densities
+
+    def _representation_elo_by_agent(self, calendar_densities: list[float]) -> list[float]:
+        if not calendar_densities:
+            return []
+        mean_density = sum(calendar_densities) / len(calendar_densities)
+        return [
+            round(
+                self.config.representation_elo_base
+                + self.config.representation_elo_scale * (density - mean_density),
+                3,
+            )
+            for density in calendar_densities
+        ]
+
     def generate_scenario(self) -> dict:
         """Generate a scenario from this game's config. Can be inspected or modified before run_with_scenario()."""
         if self.config.task_path:
@@ -312,6 +384,7 @@ class CalendarGame:
             speaker_orders=speaker_orders,
             errand_cost_level=self.config.errand_cost_level,
             meeting_cost_level=self.config.meeting_cost_level,
+            agent_densities=self.config.agent_densities,
         )
 
     def _load_task_scenario(self) -> dict:
@@ -356,6 +429,7 @@ class CalendarGame:
                     "prior_meetings": task.get("prior_meetings", []),
                     "feasible": task.get("feasible", True),
                     "task_id": task.get("task_id"),
+                    "agent_densities": task.get("params", {}).get("agent_densities"),
                 }
 
         raise ValueError(f"task_id {self.config.task_id!r} not found in {task_path}")
@@ -373,8 +447,7 @@ class CalendarGame:
             if self.dry_run:
                 client: BaseClient = ScriptedClient()
             else:
-                spec = self.config.agents[agent_id] if agent_id < len(self.config.agents) else {"model": "gpt-4o-mini"}
-                cfg = spec.model_dump() if hasattr(spec, "model_dump") else dict(spec)
+                cfg = self._agent_spec_for(agent_id)
                 agent_type = cfg.get("type", "llm")
                 if agent_type == "dsm":
                     client = DSMClient()
@@ -439,6 +512,10 @@ class CalendarGame:
             self._annotate_calendars(agents, scenario)
         nosy_agent_ids = self._nosy_agent_ids()
         blocked_slots_by_agent = self._blocked_slots_by_agent(scenario)
+        communication_protocol = self._communication_protocol()
+        team_metadata = self._agent_team_metadata()
+        initial_calendar_densities = self._actual_calendar_densities(scenario["calendars"])
+        representation_elo_by_agent = self._representation_elo_by_agent(initial_calendar_densities)
 
         # 3. game_start event — emitted before agent registration so it is always first
         self.events.append("game_start", data={
@@ -449,6 +526,11 @@ class CalendarGame:
             "optimal_cost": optimal.get("cost"),
             "greedy_cost": greedy.get("cost"),
             "nosy_agent_ids": nosy_agent_ids,
+            "communication_protocol": communication_protocol,
+            "agent_densities": scenario.get("agent_densities") or self.config.agent_densities,
+            "initial_calendar_density_by_agent": initial_calendar_densities,
+            "representation_elo_by_agent": representation_elo_by_agent,
+            **team_metadata,
         })
 
         # 4. Register all agents
@@ -484,6 +566,7 @@ class CalendarGame:
                 dsm_privacy_unit_cost=self.config.dsm_privacy_unit_cost,
                 dsm_initial_budget=self.config.dsm_initial_budget,
                 sd_model={int(k): float(v) for k, v in self.config.sd_model.items()},
+                communication_protocol=communication_protocol,
             )
             agent.register(agent_id, game_config)
             system_prompt_text = getattr(agent.client, "_system_prompt", None) or build_system_prompt(
@@ -493,6 +576,10 @@ class CalendarGame:
                 "round": -1, "turn": -1, "phase": "GAME_START", "agent_id": agent_id,
                 "is_nosy_agent": agent_id in nosy_agent_ids,
                 "nosy_agent_ids": nosy_agent_ids,
+                "model": team_metadata["agent_models"][agent_id],
+                "agent_type": team_metadata["agent_types"][agent_id],
+                "initial_calendar_density": initial_calendar_densities[agent_id],
+                "representation_elo": representation_elo_by_agent[agent_id],
                 "system_prompt": system_prompt_text,
                 "calendar_render": agent.calendar.render(),
             })
@@ -502,8 +589,13 @@ class CalendarGame:
         fallback_displacement_cost: dict[int, int] = {i: 0 for i in range(self.config.num_agents)}
         total_client_calls: dict[int, int] = {i: 0 for i in range(self.config.num_agents)}
         total_dms_sent: int = 0
+        total_groupchat_messages_sent: int = 0
         total_dm_chars: int = 0
+        total_groupchat_chars: int = 0
         max_dm_chars: int = 0
+        max_groupchat_chars: int = 0
+        messages_sent_by_agent: dict[int, int] = {i: 0 for i in range(self.config.num_agents)}
+        messages_received_by_agent: dict[int, int] = {i: 0 for i in range(self.config.num_agents)}
         round_outcomes: list[dict] = []
         registered_meetings: dict[int, dict] = {
             int(meeting["id"]): meeting
@@ -522,6 +614,110 @@ class CalendarGame:
             if prior.get("slot") is not None
         }  # meeting_id → canonical_slot
 
+        def deliver_cheap_talk_tool(
+            *,
+            tool: dict,
+            agent_id: int,
+            meeting: dict,
+            round_num: int,
+            turn_index: int,
+            already_queued: set[int],
+            groupchat_member_ids: list[int],
+        ) -> bool:
+            nonlocal total_dms_sent
+            nonlocal total_groupchat_messages_sent
+            nonlocal total_dm_chars
+            nonlocal total_groupchat_chars
+            nonlocal max_dm_chars
+            nonlocal max_groupchat_chars
+
+            tool_type = tool.get("type")
+            if tool_type == "dm":
+                if not self._allows_dm():
+                    self._invalid_tool_call(
+                        round_num=round_num, turn=turn_index, phase="CHEAP_TALK",
+                        agent_id=agent_id, tool=tool, reason="dm tool is disabled by communication_protocol",
+                    )
+                    return False
+                try:
+                    to = int(tool["to"])
+                except (KeyError, TypeError, ValueError):
+                    self._invalid_tool_call(
+                        round_num=round_num, turn=turn_index, phase="CHEAP_TALK",
+                        agent_id=agent_id, tool=tool, reason="dm tool missing integer 'to'",
+                    )
+                    return False
+                if to < 0 or to >= self.config.num_agents:
+                    self._invalid_tool_call(
+                        round_num=round_num, turn=turn_index, phase="CHEAP_TALK",
+                        agent_id=agent_id, tool=tool, reason="dm recipient is out of range",
+                    )
+                    return False
+                msg = {
+                    "from": agent_id,
+                    "to": to,
+                    "channel": "dm",
+                    "meeting_id": meeting["id"],
+                    "content": str(tool.get("content", "")),
+                }
+                dm_chars = len(msg["content"])
+                agents[to].inbox_queue.append(msg)
+                messages_sent_by_agent[agent_id] += 1
+                messages_received_by_agent[to] += 1
+                total_dms_sent += 1
+                total_dm_chars += dm_chars
+                max_dm_chars = max(max_dm_chars, dm_chars)
+                self.events.append("dm_sent", data={
+                    "round": round_num, "turn": turn_index, "phase": "CHEAP_TALK",
+                    "agent_id": agent_id,
+                    "from_agent": agent_id, "to_agent": to,
+                    "meeting_id": msg["meeting_id"], "content": msg["content"],
+                    "content_chars": dm_chars,
+                    "channel": "dm",
+                })
+                if to not in meeting["participants"] and to not in already_queued:
+                    already_queued.add(to)
+                return True
+
+            if tool_type == "groupchat":
+                if not self._allows_groupchat():
+                    self._invalid_tool_call(
+                        round_num=round_num, turn=turn_index, phase="CHEAP_TALK",
+                        agent_id=agent_id, tool=tool, reason="groupchat tool is disabled by communication_protocol",
+                    )
+                    return False
+                content = str(tool.get("content", ""))
+                msg_chars = len(content)
+                recipients = [to for to in groupchat_member_ids if to != agent_id]
+                for to in recipients:
+                    agents[to].inbox_queue.append({
+                        "from": agent_id,
+                        "to": None,
+                        "channel": "groupchat",
+                        "meeting_id": meeting["id"],
+                        "content": content,
+                    })
+                    messages_received_by_agent[to] += 1
+                    if to not in meeting["participants"]:
+                        already_queued.add(to)
+                messages_sent_by_agent[agent_id] += 1
+                total_groupchat_messages_sent += 1
+                total_groupchat_chars += msg_chars
+                max_groupchat_chars = max(max_groupchat_chars, msg_chars)
+                self.events.append("groupchat_sent", data={
+                    "round": round_num, "turn": turn_index, "phase": "CHEAP_TALK",
+                    "agent_id": agent_id,
+                    "from_agent": agent_id,
+                    "to_agents": recipients,
+                    "meeting_id": meeting["id"],
+                    "content": content,
+                    "content_chars": msg_chars,
+                    "channel": "groupchat",
+                })
+                return True
+
+            return False
+
         # 6. Main loop — one round per meeting
         for round_num, meeting in enumerate(scenario["meetings"]):
             speaker_order = self._speaker_order(meeting)
@@ -529,10 +725,14 @@ class CalendarGame:
                 "round": round_num, "turn": 0, "phase": "CHEAP_TALK", "agent_id": None,
                 "meeting": meeting,
                 "speaker_order": speaker_order,
+                "communication_protocol": communication_protocol,
             })
 
-            # call start_round for all participants
-            for agent_id in speaker_order:
+            groupchat_member_ids = all_agent_ids if self._allows_groupchat() else list(speaker_order)
+            cheap_talk_actor_ids = groupchat_member_ids if self._allows_groupchat() else list(speaker_order)
+
+            # call start_round for all active cheap-talk agents
+            for agent_id in cheap_talk_actor_ids:
                 agents[agent_id].start_round(meeting, round_num, incurred_penalty=displacement_cost[agent_id])
 
             # per-round state
@@ -545,8 +745,8 @@ class CalendarGame:
             while has_activity and turn_index < self.config.max_turns_per_round:
                 has_activity = False
 
-                # participants act
-                for agent_id in speaker_order:
+                # active cheap-talk agents act
+                for agent_id in cheap_talk_actor_ids:
                     agent = agents[agent_id]
                     inbox_snapshot = list(agents[agent_id].inbox_queue)
                     calendar_render = agents[agent_id].calendar.render()
@@ -560,12 +760,14 @@ class CalendarGame:
                             incurred_penalty=displacement_cost[agent_id],
                             turn_index=turn_index,
                             max_turns_per_round=self.config.max_turns_per_round,
+                            communication_protocol=communication_protocol,
                         )
                         if turn_index == 0
                         else build_turn_message(
                             inbox_snapshot,
                             turn_index,
                             self.config.max_turns_per_round,
+                            communication_protocol=communication_protocol,
                         )
                     )
                     self.events.append("turn_start", data={
@@ -595,37 +797,19 @@ class CalendarGame:
                                 agent_id=agent_id, tool=tool, reason="tool call is not an object",
                             )
                             continue
-                        if tool.get("type") != "dm":
-                            continue
-                        try:
-                            to = int(tool["to"])
-                        except (KeyError, TypeError, ValueError):
-                            self._invalid_tool_call(
-                                round_num=round_num, turn=turn_index, phase="CHEAP_TALK",
-                                agent_id=agent_id, tool=tool, reason="dm tool missing integer 'to'",
-                            )
-                            continue
-                        # deliver DM
-                        msg = {"from": agent_id, "meeting_id": meeting["id"], "content": str(tool.get("content", ""))}
-                        dm_chars = len(msg["content"])
-                        agents[to].inbox_queue.append(msg)
-                        total_dms_sent += 1
-                        total_dm_chars += dm_chars
-                        max_dm_chars = max(max_dm_chars, dm_chars)
-                        has_activity = True
-                        self.events.append("dm_sent", data={
-                            "round": round_num, "turn": turn_index, "phase": "CHEAP_TALK",
-                            "agent_id": agent_id,
-                            "from_agent": agent_id, "to_agent": to,
-                            "meeting_id": msg["meeting_id"], "content": msg["content"],
-                            "content_chars": dm_chars,
-                        })
-                        # queue non-participants
-                        if to not in meeting["participants"] and to not in already_queued:
-                            already_queued.add(to)
+                        if deliver_cheap_talk_tool(
+                            tool=tool,
+                            agent_id=agent_id,
+                            meeting=meeting,
+                            round_num=round_num,
+                            turn_index=turn_index,
+                            already_queued=already_queued,
+                            groupchat_member_ids=groupchat_member_ids,
+                        ):
+                            has_activity = True
 
                 # drain unique_queue (non-participants who got DMs)
-                queue = list(already_queued - set(meeting["participants"]))
+                queue = list(already_queued - set(cheap_talk_actor_ids))
                 for agent_id in queue:
                     agent = agents[agent_id]
                     inbox_snapshot = list(agents[agent_id].inbox_queue)
@@ -635,6 +819,7 @@ class CalendarGame:
                         inbox_snapshot,
                         turn_index,
                         self.config.max_turns_per_round,
+                        communication_protocol=communication_protocol,
                     )
                     self.events.append("turn_start", data={
                         "round": round_num, "turn": turn_index, "phase": "CHEAP_TALK",
@@ -660,32 +845,16 @@ class CalendarGame:
                                 agent_id=agent_id, tool=tool, reason="tool call is not an object",
                             )
                             continue
-                        if tool.get("type") != "dm":
-                            continue
-                        try:
-                            to = int(tool["to"])
-                        except (KeyError, TypeError, ValueError):
-                            self._invalid_tool_call(
-                                round_num=round_num, turn=turn_index, phase="CHEAP_TALK",
-                                agent_id=agent_id, tool=tool, reason="dm tool missing integer 'to'",
-                            )
-                            continue
-                        msg = {"from": agent_id, "meeting_id": meeting["id"], "content": str(tool.get("content", ""))}
-                        dm_chars = len(msg["content"])
-                        agents[to].inbox_queue.append(msg)
-                        total_dms_sent += 1
-                        total_dm_chars += dm_chars
-                        max_dm_chars = max(max_dm_chars, dm_chars)
-                        has_activity = True
-                        self.events.append("dm_sent", data={
-                            "round": round_num, "turn": turn_index, "phase": "CHEAP_TALK",
-                            "agent_id": agent_id,
-                            "from_agent": agent_id, "to_agent": to,
-                            "meeting_id": msg["meeting_id"], "content": msg["content"],
-                            "content_chars": dm_chars,
-                        })
-                        if to not in already_queued:
-                            already_queued.add(to)
+                        if deliver_cheap_talk_tool(
+                            tool=tool,
+                            agent_id=agent_id,
+                            meeting=meeting,
+                            round_num=round_num,
+                            turn_index=turn_index,
+                            already_queued=already_queued,
+                            groupchat_member_ids=groupchat_member_ids,
+                        ):
+                            has_activity = True
 
                 turn_index += 1
 
@@ -1074,6 +1243,85 @@ class CalendarGame:
         per_agent_fallback_cost_list = [fallback_displacement_cost[i] for i in range(self.config.num_agents)]
         max_cost = max(per_agent_cost_list) if per_agent_cost_list else 0
         fairness = min(per_agent_cost_list) / max_cost if max_cost > 0 else 1.0
+        participant_rounds = {i: 0 for i in range(self.config.num_agents)}
+        coordinated_participant_rounds = {i: 0 for i in range(self.config.num_agents)}
+        for outcome, meeting in zip(round_outcomes, scenario["meetings"], strict=False):
+            for agent_id in meeting["participants"]:
+                participant_rounds[agent_id] += 1
+                if outcome["coordinated"]:
+                    coordinated_participant_rounds[agent_id] += 1
+
+        total_cheap_talk_messages = total_dms_sent + total_groupchat_messages_sent
+        max_representation_elo = max(representation_elo_by_agent) if representation_elo_by_agent else 1.0
+        contribution_scores: list[dict] = []
+        for agent_id in range(self.config.num_agents):
+            participation_count = participant_rounds[agent_id]
+            coordination_rate_for_agent = (
+                coordinated_participant_rounds[agent_id] / participation_count
+                if participation_count > 0
+                else 0.0
+            )
+            communication_share = (
+                messages_sent_by_agent[agent_id] / total_cheap_talk_messages
+                if total_cheap_talk_messages > 0
+                else 0.0
+            )
+            cost_efficiency = (
+                1.0 - (per_agent_cost_list[agent_id] / max_cost)
+                if max_cost > 0
+                else 1.0
+            )
+            raw_score = (
+                100.0
+                * (
+                    0.60 * coordination_rate_for_agent
+                    + 0.25 * cost_efficiency
+                    + 0.15 * communication_share
+                )
+            )
+            representation_weight = (
+                representation_elo_by_agent[agent_id] / max_representation_elo
+                if max_representation_elo > 0
+                else 1.0
+            )
+            model = team_metadata["agent_models"][agent_id]
+            contribution_scores.append({
+                "agent_id": agent_id,
+                "model": model,
+                "agent_type": team_metadata["agent_types"][agent_id],
+                "participant_rounds": participation_count,
+                "coordinated_participant_rounds": coordinated_participant_rounds[agent_id],
+                "coordination_rate": round(coordination_rate_for_agent, 6),
+                "messages_sent": messages_sent_by_agent[agent_id],
+                "messages_received": messages_received_by_agent[agent_id],
+                "communication_share": round(communication_share, 6),
+                "cost": per_agent_cost_list[agent_id],
+                "fallback_cost": per_agent_fallback_cost_list[agent_id],
+                "cost_efficiency": round(cost_efficiency, 6),
+                "calendar_density": round(initial_calendar_densities[agent_id], 6),
+                "representation_elo": representation_elo_by_agent[agent_id],
+                "contribution_score": round(raw_score, 6),
+                "density_adjusted_contribution_score": round(raw_score * representation_weight, 6),
+            })
+
+        model_contribution_summary: dict[str, dict] = {}
+        for model in sorted(set(team_metadata["agent_models"])):
+            rows = [row for row in contribution_scores if row["model"] == model]
+            if not rows:
+                continue
+            model_contribution_summary[model] = {
+                "agent_count": len(rows),
+                "mean_contribution_score": round(
+                    sum(float(row["contribution_score"]) for row in rows) / len(rows),
+                    6,
+                ),
+                "mean_density_adjusted_contribution_score": round(
+                    sum(float(row["density_adjusted_contribution_score"]) for row in rows) / len(rows),
+                    6,
+                ),
+                "total_messages_sent": sum(int(row["messages_sent"]) for row in rows),
+                "total_cost": sum(float(row["cost"]) for row in rows),
+            }
 
         metrics = {
             "coordination_rate": coordination_rate,
@@ -1082,14 +1330,28 @@ class CalendarGame:
             "fairness": fairness,
             "meetings_scheduled": coordinated_meetings,
             "total_dms_sent": total_dms_sent,
+            "total_groupchat_messages_sent": total_groupchat_messages_sent,
+            "total_cheap_talk_messages": total_cheap_talk_messages,
             "total_dm_chars": total_dm_chars,
+            "total_groupchat_chars": total_groupchat_chars,
             "avg_dm_chars": avg_dm_chars,
             "max_dm_chars": max_dm_chars,
+            "max_groupchat_chars": max_groupchat_chars,
             "dm_chars_per_meeting": dm_chars_per_meeting,
             "realized_cost": realized_cost,
             "fallback_displacement_cost": total_fallback_cost,
             "optimal_cost": optimal_cost,
             "nosy_agent_count": len(nosy_agent_ids),
+            "communication_protocol": communication_protocol,
+            "team_model_label": team_metadata["team_model_label"],
+            "team_model_counts": team_metadata["team_model_counts"],
+            "is_heterogeneous_team": team_metadata["is_heterogeneous_team"],
+            "mean_contribution_score": (
+                sum(float(row["contribution_score"]) for row in contribution_scores) / len(contribution_scores)
+                if contribution_scores
+                else 0.0
+            ),
+            "model_contribution_summary": model_contribution_summary,
         }
 
         self.events.append("game_end", data={
@@ -1105,8 +1367,19 @@ class CalendarGame:
                 "calendars": [agent.calendar.slots for agent in agents],
                 "per_agent_cost": per_agent_cost_list,
                 "per_agent_fallback_cost": per_agent_fallback_cost_list,
+                "per_agent_messages_sent": [
+                    messages_sent_by_agent[i] for i in range(self.config.num_agents)
+                ],
+                "per_agent_messages_received": [
+                    messages_received_by_agent[i] for i in range(self.config.num_agents)
+                ],
+                "initial_calendar_density_by_agent": initial_calendar_densities,
+                "representation_elo_by_agent": representation_elo_by_agent,
+                "contribution_scores": contribution_scores,
+                "model_contribution_summary": model_contribution_summary,
                 "round_outcomes": round_outcomes,
                 "nosy_agent_ids": nosy_agent_ids,
+                **team_metadata,
             },
             metrics=metrics,
         )

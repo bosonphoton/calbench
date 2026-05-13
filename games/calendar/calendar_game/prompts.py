@@ -23,8 +23,8 @@ def build_system_prompt(game_config: dict) -> str:
     num_slots = game_config["num_slots"]
     decision_retries = game_config["decision_retries"]
     num_agents = game_config["num_agents"]
+    communication_protocol = str(game_config.get("communication_protocol", "dm"))
 
-    other_ids = [str(a) for a in all_agent_ids if a != agent_id]
     all_ids_str = ", ".join(str(a) for a in all_agent_ids)
 
     return f"""You are responsible for helping your user schedule a series of meetings. Your goal is to MINIMIZE THE TOTAL COST incurred by your user across all meetings. Costs are incurred by rescheduling errands and meetings on your calendar, but not by scheduling the new meeting itself.
@@ -35,7 +35,7 @@ def build_system_prompt(game_config: dict) -> str:
 3. When rescheduling meetings, all participants in the meeting must move the meeting to the same new slot, or that will also cause a consistency violation.
 
 === IMPORTANT CONSTRAINTS ===
-1. You only see YOUR OWN calendar and YOUR OWN DM inbox. You cannot observe other agents' calendars directly.
+1. You only see YOUR OWN calendar and the messages delivered to you. You cannot observe other agents' calendars directly.
 2. You may NOT share details of your errands or meetings with non-participants to avoid leaking private information.
 3. You may NOT share penalties or costs associated with rescheduling (these are private cost functions which are incommensurate across agents).
 
@@ -61,11 +61,8 @@ Cost to reschedule: moving errands and meetings will incur a variable penalty co
 === TOOLS ===
 You interact with the environment by returning a JSON list of tool-call objects.
 
-** CHEAP_TALK phase — only this tool is valid: **
-{{"type": "dm", "to": <agent_id (int)>, "content": "<message string>"}}
-  - Send a direct message to another agent about a specific meeting.
-  - You may send multiple DMs per CHEAP_TALK turn.
-  - Messages are delivered before the next turn.
+** CHEAP_TALK phase — only the active communication tool(s) are valid: **
+{_cheap_talk_tool_spec(communication_protocol)}
 
 ** DECISION phase — only these tools are valid: **
 {{"type": "schedule", "meeting_id": <meeting_id (int)>, "slot": <slot_index (int)>}}
@@ -80,13 +77,12 @@ You interact with the environment by returning a JSON list of tool-call objects.
 Each round has four phases:
 
 1. CHEAP_TALK
-   - You may send DMs to coordinate which slot to use for the meeting.
-   - Only the "dm" tool is valid.
-   - Multiple turns occur; the phase ends when no more DMs are sent.
+   - Use the active communication tool(s) to coordinate which slot to use for the meeting.
+   - Multiple turns occur; the phase ends when no more communication actions are sent.
    - If you have nothing to do, return [] for actions.
 
 2. VOLUNTARY (non-participants only)
-   - If you received a DM this round but are NOT a participant in the current meeting, you get a chance to reschedule items on your calendar to help others.
+   - If you received a message this round but are NOT a participant in the current meeting, you get a chance to reschedule items on your calendar to help others.
    - Only the "reschedule" tool is valid.
    - This is your opportunity to move a shared meeting that a participant needs you to vacate.
 
@@ -106,10 +102,7 @@ Always respond with a JSON object with two keys:
   "actions"  : a list of tool calls (use [] to pass with no action)
 
 Example:
-{{
-  "thinking": "Agent 1 suggested slot 5 but I have an errand there. Slot 2 is free for both of us.",
-  "actions": [{{"type": "dm", "to": 1, "content": "Let's use slot 2."}}]
-}}
+{_response_format_example(communication_protocol)}
 
 Do NOT include any text outside the JSON object.
 
@@ -120,11 +113,43 @@ All agents in this environment ({num_agents} total): {all_ids_str}
 === ENVIRONMENT PARAMETERS ===
 - Number of calendar slots: {num_slots}
 - Decision retries allowed if validation fails: {decision_retries}
+- Communication protocol: {communication_protocol}
 - One meeting will be scheduled per round, with a random subset of agents as participants.
 - There may be multiple rounds, and you will schedule a different meeting each round.
 
 Do NOT include any text outside the JSON object.
 """
+
+
+def _cheap_talk_tool_spec(communication_protocol: str) -> str:
+    protocol = communication_protocol.lower()
+    if protocol == "groupchat":
+        return """{"type": "groupchat", "content": "<message string>"}
+  - Send a message to the task groupchat. All agents can read it before their next turn.
+  - You may send multiple groupchat messages per CHEAP_TALK turn."""
+    if protocol == "dm_and_groupchat":
+        return """{"type": "dm", "to": <agent_id (int)>, "content": "<message string>"}
+  - Send a direct message to another agent about a specific meeting.
+
+{"type": "groupchat", "content": "<message string>"}
+  - Send a message to the task groupchat. All agents can read it before their next turn.
+  - You may send multiple communication actions per CHEAP_TALK turn."""
+    return """{"type": "dm", "to": <agent_id (int)>, "content": "<message string>"}
+  - Send a direct message to another agent about a specific meeting.
+  - You may send multiple DMs per CHEAP_TALK turn.
+  - Messages are delivered before the next turn."""
+
+
+def _response_format_example(communication_protocol: str) -> str:
+    if communication_protocol.lower() == "groupchat":
+        return """{
+  "thinking": "Slot 2 is free for me and seems worth proposing to the group.",
+  "actions": [{"type": "groupchat", "content": "Slot 2 works for me."}]
+}"""
+    return """{
+  "thinking": "Agent 1 suggested slot 5 but I have an errand there. Slot 2 is free for both of us.",
+  "actions": [{"type": "dm", "to": 1, "content": "Let's use slot 2."}]
+}"""
 
 
 def _resolve_prompt_variant(variant_name: str | None, variant_dir: str | None = None) -> Path:
@@ -180,6 +205,15 @@ def _turn_budget_text(turn_index: int | None, max_turns_per_round: int | None) -
     )
 
 
+def _cheap_talk_action_text(communication_protocol: str) -> str:
+    protocol = communication_protocol.lower()
+    if protocol == "groupchat":
+        return 'Only the "groupchat" tool is valid right now.'
+    if protocol == "dm_and_groupchat":
+        return 'Only the "dm" and "groupchat" tools are valid right now.'
+    return 'Only the "dm" tool is valid right now.'
+
+
 def build_round_start_message(
     meeting: dict,
     calendar_render: str,
@@ -187,6 +221,7 @@ def build_round_start_message(
     incurred_penalty: int = 0,
     turn_index: int | None = None,
     max_turns_per_round: int | None = None,
+    communication_protocol: str = "dm",
 ) -> str:
     """
     User message for turn 0 of CHEAP_TALK (delivered via start_round).
@@ -212,7 +247,7 @@ Duration   : {duration} slot(s)
 You have personally incurred {incurred_penalty} total penalty points from rescheduling or displacement in previous decisions.
 
 ** CURRENT PHASE: CHEAP_TALK **
-Only the "dm" tool is valid right now.
+{_cheap_talk_action_text(communication_protocol)}
 Coordinate with the other participants to agree on a slot for meeting {meeting_id}.
 {_turn_budget_text(turn_index, max_turns_per_round)}
 
@@ -222,7 +257,7 @@ you must independently write the agreed slot to your own calendar using the
 
 Reminder: Treat rescheduling errands or prior meetings as a last resort. First propose free slots and negotiate for a mutually low-displacement slot. If a proposed slot would require you to move something, push back politely and offer easier alternatives without revealing exact costs or private details.
 
-Return a JSON object with "thinking" and "actions" keys. "actions" should be a list of "dm" tool calls, or [] to pass.
+Return a JSON object with "thinking" and "actions" keys. "actions" should be a list of communication tool calls, or [] to pass.
 """
 
 
@@ -230,6 +265,7 @@ def build_turn_message(
     messages: list[dict],
     turn_index: int | None = None,
     max_turns_per_round: int | None = None,
+    communication_protocol: str = "dm",
 ) -> str:
     """
     User message for subsequent CHEAP_TALK turns (delivered via turn()).
@@ -239,16 +275,18 @@ def build_turn_message(
         return (
             "No new messages in your inbox.\n\n"
             f"{_turn_budget_text(turn_index, max_turns_per_round)}"
+            f"{_cheap_talk_action_text(communication_protocol)} "
             "CHEAP_TALK phase is still active. Return a JSON object with \"thinking\" and \"actions\" keys. Use [] for actions to pass."
         )
 
     lines = ["New messages received:\n"]
     for i, msg in enumerate(messages, start=1):
-        lines.append(
-            f"  [{i}] From Agent {msg['from']} (meeting {msg['meeting_id']}): {msg['content']}"
-        )
+        channel = msg.get("channel", "dm")
+        prefix = "Groupchat" if channel == "groupchat" else "DM"
+        lines.append(f"  [{i}] {prefix} from Agent {msg['from']} (meeting {msg['meeting_id']}): {msg['content']}")
     lines.append(
         f"\n{_turn_budget_text(turn_index, max_turns_per_round)}"
+        f"{_cheap_talk_action_text(communication_protocol)} "
         "CHEAP_TALK phase is still active. Return a JSON object with \"thinking\" and \"actions\" keys. Use [] for actions to pass."
     )
     return "\n".join(lines)

@@ -121,6 +121,46 @@ class OneShotDMClient(BaseClient):
         return DecideResult(tool_calls=[], text=None, thinking=None, usage=None, latency_ms=None, raw=None)
 
 
+class OneShotGroupchatFixedSlotClient(BaseClient):
+    """Optionally sends one groupchat message, records inboxes, then schedules a fixed slot."""
+    def __init__(self, slot: int, content: str | None = None):
+        self.slot = slot
+        self.content = content
+        self.sent = False
+        self.meeting_id = 1
+        self.received_messages: list[dict] = []
+
+    def register(self, agent_id: int, game_config: GameConfig) -> None:
+        self.agent_id = agent_id
+
+    def start_round(self, meeting: dict, calendar_render: str, round_num: int) -> None:
+        self.meeting_id = meeting["id"]
+        self.sent = False
+
+    def turn(self, messages: list[dict], turn_index: int | None = None, max_turns_per_round: int | None = None) -> TurnResult:
+        self.received_messages.extend(messages)
+        if self.content is not None and not self.sent:
+            self.sent = True
+            return TurnResult(
+                tool_calls=[{
+                    "type": "groupchat",
+                    "meeting_id": self.meeting_id,
+                    "content": self.content,
+                }],
+                text=None, thinking=None, usage=None, latency_ms=None, raw=None,
+            )
+        return TurnResult(tool_calls=[], text=None, thinking=None, usage=None, latency_ms=None, raw=None)
+
+    def decide(self, meeting: dict, calendar_render: str) -> DecideResult:
+        return DecideResult(
+            tool_calls=[{"type": "schedule", "meeting_id": meeting["id"], "slot": self.slot}],
+            text=None, thinking=None, usage=None, latency_ms=None, raw=None,
+        )
+
+    def retry_decide(self, attempt: int, max_attempts: int, conflict: str) -> DecideResult:
+        return self.decide({"id": self.meeting_id}, "")
+
+
 class InvalidBatchClient(BaseClient):
     """Always returns an invalid batch (schedule for non-existent slot 999)."""
     def __init__(self, meeting_id: int = 1):
@@ -541,6 +581,88 @@ def test_malformed_tool_calls_are_rejected_not_crashing():
     rejected = events_of_type(trace, "batch_rejected")
     assert any("missing required field" in e["data"]["conflict_description"] for e in rejected)
     assert trace.metrics["meetings_scheduled"] == 1
+
+
+def test_asymmetric_agent_densities_generate_different_calendar_loads():
+    scenario = generate_scenario(
+        seed=11,
+        num_agents=3,
+        num_slots=10,
+        density=0.5,
+        pref_level=1,
+        num_meetings=1,
+        participant_lists=[[0, 1, 2]],
+        speaker_orders=[[0, 1, 2]],
+        agent_densities=[0.1, 0.5, 0.9],
+    )
+
+    errand_counts = [
+        sum(1 for slot in calendar if isinstance(slot, dict) and "errand_id" in slot)
+        for calendar in scenario["calendars"]
+    ]
+
+    assert scenario["agent_densities"] == [0.1, 0.5, 0.9]
+    assert errand_counts == [1, 5, 9]
+
+
+def test_groupchat_protocol_delivers_messages_to_all_task_agents_and_scores_mixed_team():
+    config = CalendarGameConfig(
+        seed=1,
+        num_agents=3,
+        num_slots=4,
+        num_meetings=1,
+        communication_protocol="groupchat",
+        max_turns_per_round=2,
+        enable_fallback=False,
+        agents=[
+            {"type": "llm", "model": "model-a"},
+            {"type": "llm", "model": "model-b"},
+            {"type": "llm", "model": "model-b"},
+        ],
+    )
+    game = CalendarGame(config, dry_run=True)
+    scenario = {
+        "seed": 1,
+        "num_agents": 3,
+        "num_slots": 4,
+        "calendars": [[None, None, None, None] for _ in range(3)],
+        "meetings": [{
+            "id": 1,
+            "participants": [0, 1],
+            "speaker_order": [0, 1],
+            "duration": 1,
+            "cost": 1,
+        }],
+        "optimal": {"cost": 0, "assignments": {"1": 0}},
+        "greedy": {"cost": 0, "assignments": {"1": 0}},
+        "feasible": True,
+    }
+    clients = [
+        OneShotGroupchatFixedSlotClient(0, content="slot 0 works for me"),
+        OneShotGroupchatFixedSlotClient(0),
+        OneShotGroupchatFixedSlotClient(0),
+    ]
+    agents: list[Agent] = []
+    for agent_id, client in enumerate(clients):
+        agent = Agent(client)
+        cal = Calendar(config.num_slots)
+        cal.slots = list(scenario["calendars"][agent_id])
+        agent.calendar = cal
+        agents.append(agent)
+
+    trace = game._run_with_agents(agents, scenario)
+
+    groupchat_events = events_of_type(trace, "groupchat_sent")
+    assert len(groupchat_events) == 1
+    assert groupchat_events[0]["data"]["to_agents"] == [1, 2]
+    assert clients[1].received_messages[0]["channel"] == "groupchat"
+    assert clients[2].received_messages[0]["content"] == "slot 0 works for me"
+    assert trace.metrics["total_groupchat_messages_sent"] == 1
+    assert trace.metrics["total_dms_sent"] == 0
+    assert trace.metrics["is_heterogeneous_team"] is True
+    assert trace.metrics["team_model_counts"] == {"model-a": 1, "model-b": 2}
+    assert len(trace.final_state["contribution_scores"]) == 3
+    assert trace.final_state["contribution_scores"][0]["model"] == "model-a"
 
 
 def test_phase_ordering():

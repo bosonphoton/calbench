@@ -290,6 +290,7 @@ def build_task(spec: dict[str, Any], *, difficulty_scorer: str = DEFAULT_DIFFICU
     errand_cost_values = spec.get("errand_cost_values")
     errand_cost_level = spec.get("errand_cost_level")
     meeting_cost_level = spec.get("meeting_cost_level", 1)
+    agent_densities = spec.get("agent_densities")
     participant_lists = spec.get("participant_lists")
     if participant_lists is None:
         if num_meetings == 1:
@@ -323,6 +324,7 @@ def build_task(spec: dict[str, Any], *, difficulty_scorer: str = DEFAULT_DIFFICU
         errand_cost_multiplier=errand_cost_multiplier,
         errand_cost_level=errand_cost_level,
         meeting_cost_level=meeting_cost_level,
+        agent_densities=agent_densities,
     )
     if errand_cost_values:
         assign_balanced_errand_costs(
@@ -352,6 +354,7 @@ def build_task(spec: dict[str, Any], *, difficulty_scorer: str = DEFAULT_DIFFICU
             "num_meetings": num_meetings,
             "duration": DURATION,
             "density": spec["density"],
+            "agent_densities": scenario.get("agent_densities"),
             "pref_level": spec["pref_level"],
             "errand_cost_multiplier": errand_cost_multiplier,
             "meeting_cost_range": [1, meeting_cost_level],
@@ -1403,6 +1406,7 @@ def expand_custom_config_cells(raw_configs: list[dict[str, Any]]) -> list[dict[s
                     "meeting_cost_level",
                     "participant_lists",
                     "speaker_orders",
+                    "agent_densities",
                 ):
                     if key in raw:
                         cell[key] = raw[key]
@@ -1436,6 +1440,7 @@ def build_tasks_from_config(
         "errand_cost_level",
         "errand_cost_values",
         "meeting_cost_level",
+        "agent_densities",
     }
     generation_defaults = {
         key: value

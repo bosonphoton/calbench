@@ -138,6 +138,7 @@ class LLMClient(BaseClient):
         self._round_num: int = 0
         self._incurred_penalty: int = 0
         self._first_turn: bool = True
+        self._communication_protocol = game_config.communication_protocol
 
     def observe_penalty(self, incurred_penalty: int) -> None:
         self._incurred_penalty = incurred_penalty
@@ -172,7 +173,7 @@ class LLMClient(BaseClient):
             if self._round_meeting is None:
                 user_msg = (
                     f"=== YOUR CALENDAR ===\n{self._round_calendar}\n\n"
-                    f"{build_turn_message(messages, turn_index, max_turns_per_round)}"
+                    f"{build_turn_message(messages, turn_index, max_turns_per_round, self._communication_protocol)}"
                 )
             else:
                 user_msg = build_round_start_message(
@@ -182,11 +183,22 @@ class LLMClient(BaseClient):
                     incurred_penalty=self._incurred_penalty,
                     turn_index=turn_index,
                     max_turns_per_round=max_turns_per_round,
+                    communication_protocol=self._communication_protocol,
                 )
                 if messages:
-                    user_msg += "\n\n" + build_turn_message(messages, turn_index, max_turns_per_round)
+                    user_msg += "\n\n" + build_turn_message(
+                        messages,
+                        turn_index,
+                        max_turns_per_round,
+                        self._communication_protocol,
+                    )
         else:
-            user_msg = build_turn_message(messages, turn_index, max_turns_per_round)
+            user_msg = build_turn_message(
+                messages,
+                turn_index,
+                max_turns_per_round,
+                self._communication_protocol,
+            )
         result = self._call(user_msg)
         return self._make_turn_result(result)
 

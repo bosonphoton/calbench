@@ -48,14 +48,26 @@ class ScriptedClient(BaseClient):
             free_slots = _parse_free_slots(self.calendar_render)
             tool_calls = []
             if self.meeting is not None:
-                for other in self.meeting.get("participants", []):
-                    if other != self.agent_id:
-                        tool_calls.append({
-                            "type": "dm",
-                            "to": other,
-                            "meeting_id": self.meeting["id"],
-                            "content": f"I'm free at slots: {free_slots}",
-                        })
+                protocol = (
+                    self.game_config.communication_protocol
+                    if self.game_config is not None
+                    else "dm"
+                )
+                if protocol == "groupchat":
+                    tool_calls.append({
+                        "type": "groupchat",
+                        "meeting_id": self.meeting["id"],
+                        "content": f"I'm free at slots: {free_slots}",
+                    })
+                else:
+                    for other in self.meeting.get("participants", []):
+                        if other != self.agent_id:
+                            tool_calls.append({
+                                "type": "dm",
+                                "to": other,
+                                "meeting_id": self.meeting["id"],
+                                "content": f"I'm free at slots: {free_slots}",
+                            })
             return TurnResult(
                 tool_calls=tool_calls,
                 text=None,

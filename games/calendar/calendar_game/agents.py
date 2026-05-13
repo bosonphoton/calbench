@@ -38,6 +38,7 @@ class GameConfig:
     dsm_privacy_unit_cost: float = 1.0
     dsm_initial_budget: int = 100
     sd_model: dict[int, float] = field(default_factory=dict)
+    communication_protocol: str = "dm"
 
 
 # ---------------------------------------------------------------------------

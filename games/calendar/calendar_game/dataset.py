@@ -57,11 +57,11 @@ class CalendarEvent:
 
     @property
     def dm_content(self) -> Optional[str]:
-        return self.data.get("content") if self.type == "dm_sent" else None
+        return self.data.get("content") if self.type in {"dm_sent", "groupchat_sent"} else None
 
     @property
     def dm_content_chars(self) -> int:
-        if self.type != "dm_sent":
+        if self.type not in {"dm_sent", "groupchat_sent"}:
             return 0
         if "content_chars" in self.data:
             return int(self.data.get("content_chars") or 0)
@@ -213,7 +213,7 @@ class CalendarGame:
 
     @property
     def models(self) -> list[str]:
-        return [a.get("model") or "unknown" for a in self.agents_config]
+        return [a.get("model") or a.get("type") or "unknown" for a in self.agents_config]
 
     @property
     def agent_types(self) -> list[str]:
@@ -223,6 +223,22 @@ class CalendarGame:
     def model_label(self) -> str:
         unique = list(dict.fromkeys(self.models))
         return unique[0] if len(unique) == 1 else " vs ".join(unique)
+
+    @property
+    def team_model_counts(self) -> dict[str, int]:
+        return self.metrics.get(
+            "team_model_counts",
+            self.raw.get("final_state", {}).get("team_model_counts", {}),
+        )
+
+    @property
+    def is_heterogeneous_team(self) -> bool:
+        return bool(
+            self.metrics.get(
+                "is_heterogeneous_team",
+                len(set(self.models)) > 1 or len(set(self.agent_types)) > 1,
+            )
+        )
 
     # --- Scenario metadata (from game_start event) ---
 
@@ -262,6 +278,16 @@ class CalendarGame:
     @property
     def total_dms(self) -> int:
         return self.metrics.get("total_dms_sent", 0)
+
+    @property
+    def total_groupchat_messages(self) -> int:
+        return int(self.metrics.get("total_groupchat_messages_sent", 0) or 0)
+
+    @property
+    def total_cheap_talk_messages(self) -> int:
+        if "total_cheap_talk_messages" in self.metrics:
+            return int(self.metrics.get("total_cheap_talk_messages") or 0)
+        return self.total_dms + self.total_groupchat_messages
 
     @property
     def total_dm_chars(self) -> int:
@@ -307,7 +333,7 @@ class CalendarGame:
         """RQ2: communication load per successfully scheduled meeting."""
         if not self.meetings_scheduled:
             return float("nan")
-        return self.total_dms / self.meetings_scheduled
+        return self.total_cheap_talk_messages / self.meetings_scheduled
 
     @property
     def excess_cost(self) -> float:
@@ -330,6 +356,18 @@ class CalendarGame:
     @property
     def per_agent_fallback_cost(self) -> list[float]:
         return self.raw.get("final_state", {}).get("per_agent_fallback_cost", [])
+
+    @property
+    def contribution_scores(self) -> list[dict[str, Any]]:
+        return self.raw.get("final_state", {}).get("contribution_scores", [])
+
+    @property
+    def representation_elo_by_agent(self) -> list[float]:
+        return self.raw.get("final_state", {}).get("representation_elo_by_agent", [])
+
+    @property
+    def initial_calendar_density_by_agent(self) -> list[float]:
+        return self.raw.get("final_state", {}).get("initial_calendar_density_by_agent", [])
 
     @property
     def total_agent_cost(self) -> float:
@@ -426,6 +464,8 @@ class CalendarGameDataset:
                 "experiment_run_id": g.experiment_run_id,
                 "seed": g.seed,
                 "model_label": g.model_label,
+                "team_model_counts": g.team_model_counts,
+                "is_heterogeneous_team": g.is_heterogeneous_team,
                 "agent_types": g.agent_types,
                 "num_agents": g.num_agents,
                 "num_slots": g.num_slots,
@@ -435,6 +475,8 @@ class CalendarGameDataset:
                 "coordination_rate": g.coordination_rate,
                 # RQ2: efficiency
                 "total_dms": g.total_dms,
+                "total_groupchat_messages": g.total_groupchat_messages,
+                "total_cheap_talk_messages": g.total_cheap_talk_messages,
                 "msgs_per_meeting": g.msgs_per_meeting,
                 "total_dm_chars": g.total_dm_chars,
                 "avg_dm_chars": g.avg_dm_chars,
@@ -449,6 +491,8 @@ class CalendarGameDataset:
                 # RQ4: fairness
                 "cost_gini": g.cost_gini,
                 "fairness_metric": g.fairness_metric,
+                "mean_contribution_score": g.metrics.get("mean_contribution_score"),
+                "model_contribution_summary": g.metrics.get("model_contribution_summary"),
             })
         return pd.DataFrame(rows)
 
@@ -485,6 +529,11 @@ class CalendarGameDataset:
             ):
                 model = g.models[i] if i < len(g.models) else "unknown"
                 atype = g.agent_types[i] if i < len(g.agent_types) else "unknown"
+                contribution = (
+                    g.contribution_scores[i]
+                    if i < len(g.contribution_scores)
+                    else {}
+                )
                 rows.append({
                     **game_meta,
                     "agent_id": i,
@@ -493,6 +542,26 @@ class CalendarGameDataset:
                     "cost": float(cost),
                     "fallback_cost": float(fallback),
                     "cost_share": float(cost) / total if total > 0 else float("nan"),
+                    "calendar_density": contribution.get(
+                        "calendar_density",
+                        g.initial_calendar_density_by_agent[i]
+                        if i < len(g.initial_calendar_density_by_agent)
+                        else float("nan"),
+                    ),
+                    "representation_elo": contribution.get(
+                        "representation_elo",
+                        g.representation_elo_by_agent[i]
+                        if i < len(g.representation_elo_by_agent)
+                        else float("nan"),
+                    ),
+                    "participant_rounds": contribution.get("participant_rounds"),
+                    "coordinated_participant_rounds": contribution.get("coordinated_participant_rounds"),
+                    "messages_sent": contribution.get("messages_sent"),
+                    "messages_received": contribution.get("messages_received"),
+                    "contribution_score": contribution.get("contribution_score"),
+                    "density_adjusted_contribution_score": contribution.get(
+                        "density_adjusted_contribution_score"
+                    ),
                 })
         return pd.DataFrame(rows)
 
@@ -502,14 +571,16 @@ class CalendarGameDataset:
         for g in self.games:
             game_meta = self._game_meta(g)
             for e in g.events:
-                if e.type != "dm_sent":
+                if e.type not in {"dm_sent", "groupchat_sent"}:
                     continue
                 rows.append({
                     **game_meta,
                     "round_number": e.round,
                     "turn": e.turn,
+                    "channel": e.data.get("channel", "dm" if e.type == "dm_sent" else "groupchat"),
                     "from_agent": e.from_agent,
                     "to_agent": e.to_agent,
+                    "to_agents": e.data.get("to_agents"),
                     "content": e.dm_content,
                     "content_chars": e.dm_content_chars,
                     "meeting_id": e.data.get("meeting_id"),
