@@ -49,7 +49,7 @@ summary_output: tasks/my_calendar_suite_summary.json
 seed_base: 900000
 candidates_per_config: 12
 selected_per_bucket: 1
-difficulty_scorer: optimal_cost_per_participant_slot
+difficulty_scorer: cp_sat_solvable_assignment_fraction
 configs:
   - total_agents: [3, 4]
     subset_sizes: [2, 3]
@@ -62,8 +62,34 @@ configs:
 ```
 
 The generator expands each config cell, samples `candidates_per_config` tasks,
-solves each with CP-SAT, sorts by difficulty, and selects
+computes oracle schedules/costs with CP-SAT, computes difficulty, and selects
 `selected_per_bucket` tasks from each easy/medium/hard tertile.
+
+By default, difficulty uses `cp_sat_solvable_assignment_fraction`:
+
+```text
+solvable_assignment_count / total_assignment_count
+```
+
+`solvable_assignment_count` is counted by asking CP-SAT to enumerate all
+feasible ordered assignments of meetings to distinct slots. The model uses one
+Boolean variable per feasible `(meeting, slot)`, requires exactly one slot per
+meeting, prevents global slot reuse, and prevents an agent from being assigned
+to two meetings in the same slot.
+
+`total_assignment_count` is the number of ordered distinct meeting-slot
+assignments:
+
+```text
+num_slots! / (num_slots - num_meetings)!
+```
+
+Lower fractions are harder, because fewer possible schedules are viable.
+Buckets are relative to each expanded config cell: candidates are sorted by
+fraction, the highest third is `easy`, the middle third is `medium`, and the
+lowest third is `hard`. Each config cell contributes the same number of tasks
+per bucket: `selected_per_bucket` easy, `selected_per_bucket` medium, and
+`selected_per_bucket` hard.
 
 Important knobs:
 
@@ -78,11 +104,11 @@ Important knobs:
 | `meeting_cost_level` | Upper bound on meeting-move costs |
 | `errand_cost_level` | Upper bound on errand costs when using uniform random costs |
 | `errand_cost_values` | Explicit balanced errand-cost multiset, e.g. `[1, 100, 1000]` |
-| `candidates_per_config` | Candidate pool size before difficulty selection |
-| `selected_per_bucket` | Tasks retained from each difficulty bucket |
+| `candidates_per_config` | Candidate pool size before per-config tertile bucketing |
+| `selected_per_bucket` | Tasks retained from each easy/medium/hard bucket per config cell |
 
 Use `--skip-optimal` only for quick one-off fixtures. Balanced suites require
-oracle costs for difficulty bucketing.
+scored tasks for difficulty bucketing.
 
 Derived suites:
 
@@ -177,13 +203,27 @@ Mixed-team and protocol knobs:
 defaults:
   game_name: calendar
   num_agents: 3
-  communication_protocol: groupchat   # dm, groupchat, or dm_and_groupchat
+  communication_protocol: all         # dm, participant_groupchat, all_groupchat, or all
   agent_densities: [0.2, 0.6, 0.9]    # optional per-agent calendar density
   agents:
     - {type: llm, model: gpt-4o-mini}
     - {type: llm, model: claude-sonnet-4-5-20250929}
     - {type: dsm}
 ```
+
+Cheap-talk channels:
+
+| Tool | Audience |
+| --- | --- |
+| `dm` | One private recipient, set with `to` |
+| `participant_groupchat` | Current meeting participants only |
+| `all_groupchat` | Every agent in the task, including non-participants |
+
+Backward-compatible protocol aliases are still accepted: `groupchat` means
+`all_groupchat`, and `dm_and_groupchat` means `dm` plus `all_groupchat`.
+Participants are active by default at the start of each meeting round.
+Non-participants become active only after receiving a DM or an all-agent
+groupchat. Participant-only groupchat does not activate non-participants.
 
 Traces record `team_model_counts`, `is_heterogeneous_team`,
 `representation_elo_by_agent`, and per-agent `contribution_scores`. The agent
@@ -261,7 +301,8 @@ Key evaluation columns:
 
 - `coordination_rate`: scheduled meetings divided by attempted meetings
 - `realized_cost`, `optimal_cost`, `excess_cost`, `cost_ratio`
-- `total_dms`, `total_groupchat_messages`, `msgs_per_meeting`, `dm_chars_per_meeting`
+- `oracle_per_agent_cost`, `per_agent_excess_burden`, and `total_excess_burden`
+- `total_dms`, `total_groupchat_messages`, `total_participant_groupchat_messages`, `total_all_groupchat_messages`, `msgs_per_meeting`, `dm_chars_per_meeting`
 - `cost_gini`, `fairness_metric`, per-agent `cost_share`, and contribution columns
 
 Reusable paper-analysis scripts live in `analysis/scripts/`.

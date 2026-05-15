@@ -93,9 +93,18 @@ editing:
 - `meeting_cost_level`, `errand_cost_level`, or explicit `errand_cost_values`
 - `candidates_per_config` and `selected_per_bucket`
 
-The generator samples candidates per configuration cell, solves each with
-OR-Tools CP-SAT, buckets candidates by oracle difficulty, and writes selected
-easy/medium/hard tasks plus a summary JSON.
+The generator samples candidates per expanded configuration cell, computes
+oracle schedules/costs with OR-Tools CP-SAT, then buckets candidates by
+`cp_sat_solvable_assignment_fraction`. That fraction is:
+
+```text
+CP-SAT feasible ordered distinct meeting-slot assignments
+/ (num_slots! / (num_slots - num_meetings)!)
+```
+
+Lower fractions are harder. Within each config cell, candidates are sorted by
+that fraction, split into easy/medium/hard tertiles, and `selected_per_bucket`
+tasks are retained from each bucket.
 
 ## Run Baselines
 
@@ -116,6 +125,13 @@ Other implemented baseline/client types can be used in experiment YAML:
 - `sd`: scheduling-difficulty baseline
 - `imap` / `incremental_map`: complete-information incremental MAP baseline
 - `llm` / `dspy`: model-backed agents
+
+Cheap-talk protocols can enable any combination of three message tools:
+`dm`, `participant_groupchat`, and `all_groupchat`. The `all` protocol enables
+all three. Backward-compatible aliases are accepted: `groupchat` means
+`all_groupchat`, and `dm_and_groupchat` means `dm` plus `all_groupchat`.
+Participants are active by default each round; non-participants become active
+after receiving a DM or all-agent groupchat.
 
 ## Run LLM Agents
 
@@ -195,8 +211,9 @@ Main metrics:
 - `optimal_cost`: CP-SAT oracle cost for the same task
 - `excess_cost`: `realized_cost - optimal_cost`
 - `cost_ratio`: `realized_cost / optimal_cost`
-- `msgs_per_meeting` and `dm_chars_per_meeting`: communication load
-- `cost_gini` and `fairness_metric`: cost-distribution fairness
+- `oracle_per_agent_cost` and `per_agent_excess_burden`: per-agent oracle burden and realized-minus-oracle burden
+- `msgs_per_meeting`, `dm_chars_per_meeting`, and groupchat message counts: communication load
+- `cost_gini`, `fairness_metric`, cost shares, and contribution scores: cost-distribution fairness and agent-level contribution summaries
 
 ## Tests
 

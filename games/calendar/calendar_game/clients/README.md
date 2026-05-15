@@ -24,9 +24,10 @@ class MyClient(BaseClient):
         max_turns_per_round: int | None = None,
     ) -> TurnResult:
         """CHEAP_TALK phase. messages is the drained inbox in arrival order.
-        Each message: {"from": int, "meeting_id": int, "content": str}
+        Each message includes:
+          {"from": int, "to": int | None, "channel": str, "meeting_id": int, "content": str}
         turn_index is zero-based; max_turns_per_round is the round's cheap-talk cap.
-        Return TurnResult. tool_calls should be dm dicts or [] to pass.
+        Return TurnResult. tool_calls should be cheap-talk dicts or [] to pass.
         """
 
     def decide(self, meeting: dict, calendar_render: str) -> DecideResult:
@@ -40,7 +41,7 @@ class MyClient(BaseClient):
 
     # Optional — default is a no-op pass
     def voluntary_decide(self, meeting: dict, calendar_render: str) -> DecideResult:
-        """VOLUNTARY phase. Called for non-participants who received DMs.
+        """VOLUNTARY phase. Called for non-participants activated by DM or all_groupchat.
         Return reschedule actions to honor coordination commitments, or [] to pass.
         """
 ```
@@ -68,6 +69,21 @@ DecideResult(
 ```
 
 Return `tool_calls=[]` to pass without action at any phase.
+
+Cheap-talk tool calls are controlled by `communication_protocol`:
+
+| Tool | Required fields | Audience |
+| --- | --- | --- |
+| `dm` | `to`, `content` | One private recipient |
+| `participant_groupchat` | `content` | Other participants in the current meeting |
+| `all_groupchat` | `content` | Every other agent in the task |
+
+`communication_protocol` may be a single channel, a list/set of channels, or an
+alias. Common aliases are `groupchat` for `all_groupchat`,
+`dm_and_groupchat` for `dm` plus `all_groupchat`, and `all` for all three
+channels. Participants are active by default. Non-participants are activated
+only after receiving a DM or `all_groupchat`; `participant_groupchat` remains
+within the current meeting participants.
 
 ## Minimal Example
 
@@ -169,6 +185,7 @@ When running through `run.py`, each agent spec maps to an `LLMClient` wrapping t
 defaults:
   game_name: calendar
   num_agents: 2
+  communication_protocol: all
   agents:
     - {type: llm, model: gpt-4o}
     - {type: llm, model: claude-sonnet-4-6}

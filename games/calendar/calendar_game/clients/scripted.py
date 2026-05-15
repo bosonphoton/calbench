@@ -53,9 +53,15 @@ class ScriptedClient(BaseClient):
                     if self.game_config is not None
                     else "dm"
                 )
-                if protocol == "groupchat":
+                if "participant_groupchat" in protocol:
                     tool_calls.append({
-                        "type": "groupchat",
+                        "type": "participant_groupchat",
+                        "meeting_id": self.meeting["id"],
+                        "content": f"I'm free at slots: {free_slots}",
+                    })
+                elif "all_groupchat" in protocol or protocol == "groupchat":
+                    tool_calls.append({
+                        "type": "all_groupchat",
                         "meeting_id": self.meeting["id"],
                         "content": f"I'm free at slots: {free_slots}",
                     })

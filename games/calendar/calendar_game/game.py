@@ -34,7 +34,7 @@ from calendar_game.privacy import hydrate_calendar_render_for_llm, hydrate_meeti
 from calendar_game.calendar import Calendar, apply_batch, validate_batch
 from calendar_game.fallback import FallbackDepthExceeded, FallbackImpossible, find_fallback_slot
 from calendar_game.scenario import generate_scenario
-from calendar_game.solver import solve_greedy, solve_optimal
+from calendar_game.solver import cost_by_agent_for_assignments, solve_greedy, solve_optimal
 from a2a_engine.llm.factory import make_llm_client
 
 
@@ -61,7 +61,7 @@ class CalendarGameConfig(GameConfigBase):
     meeting_cost_level: int = 1
     enable_fallback: bool = True
     fallback_max_depth: int = 3
-    communication_protocol: str = "dm"
+    communication_protocol: str | dict[str, bool] = "dm"
     task_path: str | None = None
     task_id: str | None = None
     dsm_num_proposals: int = 4
@@ -282,28 +282,80 @@ class CalendarGame:
                 actions.append(tool)
         return actions
 
-    def _communication_protocol(self) -> str:
-        protocol = str(self.config.communication_protocol or "dm").lower()
+    def _communication_channels(self) -> set[str]:
+        raw_protocol = self.config.communication_protocol or "dm"
         aliases = {
-            "direct": "dm",
-            "direct_message": "dm",
-            "group": "groupchat",
-            "group_chat": "groupchat",
-            "both": "dm_and_groupchat",
-            "mixed": "dm_and_groupchat",
+            "direct": {"dm"},
+            "direct_message": {"dm"},
+            "private": {"dm"},
+            "participant_groupchat": {"participant_groupchat"},
+            "participant_chat": {"participant_groupchat"},
+            "meeting_groupchat": {"participant_groupchat"},
+            "meeting_chat": {"participant_groupchat"},
+            "group": {"all_groupchat"},
+            "groupchat": {"all_groupchat"},
+            "group_chat": {"all_groupchat"},
+            "all_groupchat": {"all_groupchat"},
+            "all_agent_groupchat": {"all_groupchat"},
+            "all_agent_chat": {"all_groupchat"},
+            "dm_and_groupchat": {"dm", "all_groupchat"},
+            "dm_and_all_groupchat": {"dm", "all_groupchat"},
+            "dm_and_participant_groupchat": {"dm", "participant_groupchat"},
+            "both": {"dm", "all_groupchat"},
+            "mixed": {"dm", "all_groupchat"},
+            "all": {"dm", "participant_groupchat", "all_groupchat"},
         }
-        protocol = aliases.get(protocol, protocol)
-        if protocol not in {"dm", "groupchat", "dm_and_groupchat"}:
+        valid = {"dm", "participant_groupchat", "all_groupchat"}
+        if isinstance(raw_protocol, dict):
+            channels: set[str] = set()
+            for key, enabled in raw_protocol.items():
+                if not enabled:
+                    continue
+                normalized = str(key).lower()
+                channels.update(aliases.get(normalized, {normalized}))
+        else:
+            protocol = str(raw_protocol).lower()
+            channels = set(aliases.get(protocol, {protocol}))
+        if not channels or any(channel not in valid for channel in channels):
             raise ValueError(
-                "communication_protocol must be one of: dm, groupchat, dm_and_groupchat"
+                "communication_protocol must enable one or more of: "
+                "dm, participant_groupchat, all_groupchat"
             )
-        return protocol
+        return channels
+
+    def _communication_protocol(self) -> str:
+        channels = self._communication_channels()
+        order = ["dm", "participant_groupchat", "all_groupchat"]
+        return "+".join(channel for channel in order if channel in channels)
+
+    def _allows_channel(self, channel: str) -> bool:
+        return channel in self._communication_channels()
 
     def _allows_dm(self) -> bool:
-        return self._communication_protocol() in {"dm", "dm_and_groupchat"}
+        return self._allows_channel("dm")
+
+    def _allows_participant_groupchat(self) -> bool:
+        return self._allows_channel("participant_groupchat")
+
+    def _allows_all_groupchat(self) -> bool:
+        return self._allows_channel("all_groupchat")
 
     def _allows_groupchat(self) -> bool:
-        return self._communication_protocol() in {"groupchat", "dm_and_groupchat"}
+        return self._allows_participant_groupchat() or self._allows_all_groupchat()
+
+    def _canonical_tool_type(self, tool_type: object) -> str:
+        protocol = str(tool_type or "").lower()
+        aliases = {
+            "groupchat": "all_groupchat",
+            "group_chat": "all_groupchat",
+            "group": "all_groupchat",
+            "all_agent_groupchat": "all_groupchat",
+            "all_agent_chat": "all_groupchat",
+            "participant_chat": "participant_groupchat",
+            "meeting_groupchat": "participant_groupchat",
+            "meeting_chat": "participant_groupchat",
+        }
+        return aliases.get(protocol, protocol)
 
     def _agent_spec_for(self, agent_id: int) -> dict:
         if agent_id < len(self.config.agents):
@@ -589,11 +641,14 @@ class CalendarGame:
         fallback_displacement_cost: dict[int, int] = {i: 0 for i in range(self.config.num_agents)}
         total_client_calls: dict[int, int] = {i: 0 for i in range(self.config.num_agents)}
         total_dms_sent: int = 0
-        total_groupchat_messages_sent: int = 0
+        total_participant_groupchat_messages_sent: int = 0
+        total_all_groupchat_messages_sent: int = 0
         total_dm_chars: int = 0
-        total_groupchat_chars: int = 0
+        total_participant_groupchat_chars: int = 0
+        total_all_groupchat_chars: int = 0
         max_dm_chars: int = 0
-        max_groupchat_chars: int = 0
+        max_participant_groupchat_chars: int = 0
+        max_all_groupchat_chars: int = 0
         messages_sent_by_agent: dict[int, int] = {i: 0 for i in range(self.config.num_agents)}
         messages_received_by_agent: dict[int, int] = {i: 0 for i in range(self.config.num_agents)}
         round_outcomes: list[dict] = []
@@ -622,16 +677,18 @@ class CalendarGame:
             round_num: int,
             turn_index: int,
             already_queued: set[int],
-            groupchat_member_ids: list[int],
         ) -> bool:
             nonlocal total_dms_sent
-            nonlocal total_groupchat_messages_sent
+            nonlocal total_participant_groupchat_messages_sent
+            nonlocal total_all_groupchat_messages_sent
             nonlocal total_dm_chars
-            nonlocal total_groupchat_chars
+            nonlocal total_participant_groupchat_chars
+            nonlocal total_all_groupchat_chars
             nonlocal max_dm_chars
-            nonlocal max_groupchat_chars
+            nonlocal max_participant_groupchat_chars
+            nonlocal max_all_groupchat_chars
 
-            tool_type = tool.get("type")
+            tool_type = self._canonical_tool_type(tool.get("type"))
             if tool_type == "dm":
                 if not self._allows_dm():
                     self._invalid_tool_call(
@@ -679,32 +736,46 @@ class CalendarGame:
                     already_queued.add(to)
                 return True
 
-            if tool_type == "groupchat":
-                if not self._allows_groupchat():
+            if tool_type in {"participant_groupchat", "all_groupchat"}:
+                if not self._allows_channel(tool_type):
                     self._invalid_tool_call(
                         round_num=round_num, turn=turn_index, phase="CHEAP_TALK",
-                        agent_id=agent_id, tool=tool, reason="groupchat tool is disabled by communication_protocol",
+                        agent_id=agent_id, tool=tool,
+                        reason=f"{tool_type} tool is disabled by communication_protocol",
                     )
                     return False
                 content = str(tool.get("content", ""))
                 msg_chars = len(content)
-                recipients = [to for to in groupchat_member_ids if to != agent_id]
+                if tool_type == "participant_groupchat":
+                    recipients = [
+                        to for to in meeting["participants"]
+                        if to != agent_id
+                    ]
+                    event_type = "participant_groupchat_sent"
+                else:
+                    recipients = [to for to in all_agent_ids if to != agent_id]
+                    event_type = "all_groupchat_sent"
                 for to in recipients:
                     agents[to].inbox_queue.append({
                         "from": agent_id,
                         "to": None,
-                        "channel": "groupchat",
+                        "channel": tool_type,
                         "meeting_id": meeting["id"],
                         "content": content,
                     })
                     messages_received_by_agent[to] += 1
-                    if to not in meeting["participants"]:
+                    if tool_type == "all_groupchat" and to not in meeting["participants"]:
                         already_queued.add(to)
                 messages_sent_by_agent[agent_id] += 1
-                total_groupchat_messages_sent += 1
-                total_groupchat_chars += msg_chars
-                max_groupchat_chars = max(max_groupchat_chars, msg_chars)
-                self.events.append("groupchat_sent", data={
+                if tool_type == "participant_groupchat":
+                    total_participant_groupchat_messages_sent += 1
+                    total_participant_groupchat_chars += msg_chars
+                    max_participant_groupchat_chars = max(max_participant_groupchat_chars, msg_chars)
+                else:
+                    total_all_groupchat_messages_sent += 1
+                    total_all_groupchat_chars += msg_chars
+                    max_all_groupchat_chars = max(max_all_groupchat_chars, msg_chars)
+                self.events.append(event_type, data={
                     "round": round_num, "turn": turn_index, "phase": "CHEAP_TALK",
                     "agent_id": agent_id,
                     "from_agent": agent_id,
@@ -712,7 +783,7 @@ class CalendarGame:
                     "meeting_id": meeting["id"],
                     "content": content,
                     "content_chars": msg_chars,
-                    "channel": "groupchat",
+                    "channel": tool_type,
                 })
                 return True
 
@@ -728,11 +799,11 @@ class CalendarGame:
                 "communication_protocol": communication_protocol,
             })
 
-            groupchat_member_ids = all_agent_ids if self._allows_groupchat() else list(speaker_order)
-            cheap_talk_actor_ids = groupchat_member_ids if self._allows_groupchat() else list(speaker_order)
+            active_agent_ids: set[int] = set(speaker_order)
+            active_agent_order = list(speaker_order)
 
             # call start_round for all active cheap-talk agents
-            for agent_id in cheap_talk_actor_ids:
+            for agent_id in active_agent_order:
                 agents[agent_id].start_round(meeting, round_num, incurred_penalty=displacement_cost[agent_id])
 
             # per-round state
@@ -746,7 +817,7 @@ class CalendarGame:
                 has_activity = False
 
                 # active cheap-talk agents act
-                for agent_id in cheap_talk_actor_ids:
+                for agent_id in list(active_agent_order):
                     agent = agents[agent_id]
                     inbox_snapshot = list(agents[agent_id].inbox_queue)
                     calendar_render = agents[agent_id].calendar.render()
@@ -804,13 +875,19 @@ class CalendarGame:
                             round_num=round_num,
                             turn_index=turn_index,
                             already_queued=already_queued,
-                            groupchat_member_ids=groupchat_member_ids,
                         ):
                             has_activity = True
 
-                # drain unique_queue (non-participants who got DMs)
-                queue = list(already_queued - set(cheap_talk_actor_ids))
+                # drain unique_queue (non-participants who got DMs or all-agent groupchat)
+                queue = sorted(already_queued - active_agent_ids)
                 for agent_id in queue:
+                    active_agent_ids.add(agent_id)
+                    active_agent_order.append(agent_id)
+                    agents[agent_id].start_round(
+                        meeting,
+                        round_num,
+                        incurred_penalty=displacement_cost[agent_id],
+                    )
                     agent = agents[agent_id]
                     inbox_snapshot = list(agents[agent_id].inbox_queue)
                     calendar_render = agents[agent_id].calendar.render()
@@ -852,7 +929,6 @@ class CalendarGame:
                             round_num=round_num,
                             turn_index=turn_index,
                             already_queued=already_queued,
-                            groupchat_member_ids=groupchat_member_ids,
                         ):
                             has_activity = True
 
@@ -1233,14 +1309,25 @@ class CalendarGame:
         realized_cost = sum(displacement_cost.values())
         total_fallback_cost = sum(fallback_displacement_cost.values())
         optimal_cost = optimal.get("cost") or 0
+        replayed_oracle_cost, oracle_per_agent_cost = cost_by_agent_for_assignments(
+            scenario["calendars"],
+            scenario["meetings"],
+            optimal.get("assignments", {}),
+        )
+        if replayed_oracle_cost is None:
+            oracle_per_agent_cost = [0 for _ in range(self.config.num_agents)]
+        per_agent_cost_list = [displacement_cost[i] for i in range(self.config.num_agents)]
+        per_agent_fallback_cost_list = [fallback_displacement_cost[i] for i in range(self.config.num_agents)]
+        per_agent_excess_burden = [
+            per_agent_cost_list[i] - oracle_per_agent_cost[i]
+            for i in range(self.config.num_agents)
+        ]
 
         # efficiency: avg DMs sent per meeting scheduled (lower = more efficient)
         efficiency = total_dms_sent / coordinated_meetings if coordinated_meetings > 0 else float("inf")
         avg_dm_chars = total_dm_chars / total_dms_sent if total_dms_sent > 0 else 0.0
         dm_chars_per_meeting = total_dm_chars / coordinated_meetings if coordinated_meetings > 0 else float("inf")
 
-        per_agent_cost_list = [displacement_cost[i] for i in range(self.config.num_agents)]
-        per_agent_fallback_cost_list = [fallback_displacement_cost[i] for i in range(self.config.num_agents)]
         max_cost = max(per_agent_cost_list) if per_agent_cost_list else 0
         fairness = min(per_agent_cost_list) / max_cost if max_cost > 0 else 1.0
         participant_rounds = {i: 0 for i in range(self.config.num_agents)}
@@ -1251,7 +1338,13 @@ class CalendarGame:
                 if outcome["coordinated"]:
                     coordinated_participant_rounds[agent_id] += 1
 
+        total_groupchat_messages_sent = (
+            total_participant_groupchat_messages_sent
+            + total_all_groupchat_messages_sent
+        )
         total_cheap_talk_messages = total_dms_sent + total_groupchat_messages_sent
+        total_groupchat_chars = total_participant_groupchat_chars + total_all_groupchat_chars
+        max_groupchat_chars = max(max_participant_groupchat_chars, max_all_groupchat_chars)
         max_representation_elo = max(representation_elo_by_agent) if representation_elo_by_agent else 1.0
         contribution_scores: list[dict] = []
         for agent_id in range(self.config.num_agents):
@@ -1296,6 +1389,8 @@ class CalendarGame:
                 "messages_received": messages_received_by_agent[agent_id],
                 "communication_share": round(communication_share, 6),
                 "cost": per_agent_cost_list[agent_id],
+                "oracle_cost": oracle_per_agent_cost[agent_id],
+                "excess_burden": per_agent_excess_burden[agent_id],
                 "fallback_cost": per_agent_fallback_cost_list[agent_id],
                 "cost_efficiency": round(cost_efficiency, 6),
                 "calendar_density": round(initial_calendar_densities[agent_id], 6),
@@ -1331,16 +1426,26 @@ class CalendarGame:
             "meetings_scheduled": coordinated_meetings,
             "total_dms_sent": total_dms_sent,
             "total_groupchat_messages_sent": total_groupchat_messages_sent,
+            "total_participant_groupchat_messages_sent": total_participant_groupchat_messages_sent,
+            "total_all_groupchat_messages_sent": total_all_groupchat_messages_sent,
             "total_cheap_talk_messages": total_cheap_talk_messages,
             "total_dm_chars": total_dm_chars,
             "total_groupchat_chars": total_groupchat_chars,
+            "total_participant_groupchat_chars": total_participant_groupchat_chars,
+            "total_all_groupchat_chars": total_all_groupchat_chars,
             "avg_dm_chars": avg_dm_chars,
             "max_dm_chars": max_dm_chars,
             "max_groupchat_chars": max_groupchat_chars,
+            "max_participant_groupchat_chars": max_participant_groupchat_chars,
+            "max_all_groupchat_chars": max_all_groupchat_chars,
             "dm_chars_per_meeting": dm_chars_per_meeting,
             "realized_cost": realized_cost,
             "fallback_displacement_cost": total_fallback_cost,
             "optimal_cost": optimal_cost,
+            "oracle_cost_replayed": replayed_oracle_cost,
+            "oracle_per_agent_cost": oracle_per_agent_cost,
+            "per_agent_excess_burden": per_agent_excess_burden,
+            "total_excess_burden": sum(per_agent_excess_burden),
             "nosy_agent_count": len(nosy_agent_ids),
             "communication_protocol": communication_protocol,
             "team_model_label": team_metadata["team_model_label"],
@@ -1367,6 +1472,8 @@ class CalendarGame:
                 "calendars": [agent.calendar.slots for agent in agents],
                 "per_agent_cost": per_agent_cost_list,
                 "per_agent_fallback_cost": per_agent_fallback_cost_list,
+                "oracle_per_agent_cost": oracle_per_agent_cost,
+                "per_agent_excess_burden": per_agent_excess_burden,
                 "per_agent_messages_sent": [
                     messages_sent_by_agent[i] for i in range(self.config.num_agents)
                 ],

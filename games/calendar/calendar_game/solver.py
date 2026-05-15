@@ -122,6 +122,123 @@ def solve_optimal(calendars: list[list[Slot]], meetings: list[dict[str, Any]], n
     return {"cost": total, "assignments": assignments}
 
 
+def count_feasible_assignments_cp_sat(
+    calendars: list[list[Slot]],
+    meetings: list[dict[str, Any]],
+    num_slots: int,
+    *,
+    require_distinct_slots: bool = True,
+) -> int:
+    """Count feasible meeting-slot assignments with the CP-SAT model.
+
+    This counts assignments, not costs. When ``require_distinct_slots`` is true,
+    each slot can be used by at most one meeting, matching the task generator's
+    ordered-permutation denominator.
+    """
+    if not meetings:
+        return 1
+    if cp_model is None:
+        return _count_feasible_assignments_backtracking(
+            calendars,
+            meetings,
+            num_slots,
+            require_distinct_slots=require_distinct_slots,
+        )
+
+    model = cp_model.CpModel()
+    variables: dict[tuple[int, int], Any] = {}
+
+    for meeting in meetings:
+        meeting_id = int(meeting["id"])
+        possible = []
+        for slot in range(num_slots):
+            if _slot_cost(calendars, meeting["participants"], slot) is None:
+                continue
+            var = model.NewBoolVar(f"m{meeting_id}_s{slot}")
+            variables[(meeting_id, slot)] = var
+            possible.append(var)
+        if not possible:
+            return 0
+        model.AddExactlyOne(possible)
+
+    if require_distinct_slots:
+        for slot in range(num_slots):
+            same_slot = [
+                variables[(int(meeting["id"]), slot)]
+                for meeting in meetings
+                if (int(meeting["id"]), slot) in variables
+            ]
+            if len(same_slot) > 1:
+                model.AddAtMostOne(same_slot)
+
+    for agent_id in range(len(calendars)):
+        for slot in range(num_slots):
+            same_agent_slot = [
+                variables[(int(meeting["id"]), slot)]
+                for meeting in meetings
+                if agent_id in meeting["participants"] and (int(meeting["id"]), slot) in variables
+            ]
+            if len(same_agent_slot) > 1:
+                model.AddAtMostOne(same_agent_slot)
+
+    class _SolutionCounter(cp_model.CpSolverSolutionCallback):
+        def __init__(self) -> None:
+            super().__init__()
+            self.count = 0
+
+        def OnSolutionCallback(self) -> None:
+            self.count += 1
+
+    solver = cp_model.CpSolver()
+    counter = _SolutionCounter()
+    solver.SearchForAllSolutions(model, counter)
+    return counter.count
+
+
+def _count_feasible_assignments_backtracking(
+    calendars: list[list[Slot]],
+    meetings: list[dict[str, Any]],
+    num_slots: int,
+    *,
+    require_distinct_slots: bool,
+) -> int:
+    feasible_slots_by_meeting: list[list[int]] = []
+    for meeting in meetings:
+        feasible_slots = [
+            slot
+            for slot in range(num_slots)
+            if _slot_cost(calendars, meeting["participants"], slot) is not None
+        ]
+        if not feasible_slots:
+            return 0
+        feasible_slots_by_meeting.append(feasible_slots)
+
+    memo: dict[tuple[int, int, tuple[int, ...]], int] = {}
+
+    def walk(meeting_idx: int, used_slots: int, occupied_by_agent: tuple[int, ...]) -> int:
+        if meeting_idx == len(meetings):
+            return 1
+        key = (meeting_idx, used_slots, occupied_by_agent)
+        if key in memo:
+            return memo[key]
+        meeting = meetings[meeting_idx]
+        total = 0
+        for slot in feasible_slots_by_meeting[meeting_idx]:
+            bit = 1 << slot
+            if require_distinct_slots and used_slots & bit:
+                continue
+            if any(occupied_by_agent[agent_id] & bit for agent_id in meeting["participants"]):
+                continue
+            next_occupied = list(occupied_by_agent)
+            for agent_id in meeting["participants"]:
+                next_occupied[agent_id] |= bit
+            total += walk(meeting_idx + 1, used_slots | bit, tuple(next_occupied))
+        memo[key] = total
+        return total
+
+    return walk(0, 0, tuple(0 for _ in calendars))
+
+
 def _solve_optimal_backtracking(calendars: list[list[Slot]], meetings: list[dict[str, Any]], num_slots: int) -> dict[str, Any]:
     best_cost: int | None = None
     best_assignments: dict[int, int] = {}
@@ -167,3 +284,35 @@ def apply_schedule(calendars: list[list[Slot]], meeting: dict[str, Any], slot: i
             working[agent_id][target] = value
         working[agent_id][slot] = {"meeting_id": meeting["id"], "cost": meeting.get("cost", 1)}
     return working, total_cost, per_agent
+
+
+def cost_by_agent_for_assignments(
+    calendars: list[list[Slot]],
+    meetings: list[dict[str, Any]],
+    assignments: dict[str | int, int],
+) -> tuple[int | None, list[int]]:
+    """Replay assignments and return total plus per-agent displacement cost.
+
+    The oracle solver returns the globally optimal meeting-slot assignment.
+    Replaying that assignment against the initial calendars tells us which
+    agents bear the oracle displacement burden.
+    """
+    working = deepcopy(calendars)
+    per_agent = [0 for _ in working]
+    total = 0
+    normalized = {int(meeting_id): int(slot) for meeting_id, slot in assignments.items()}
+    for meeting in meetings:
+        meeting_id = int(meeting["id"])
+        if meeting_id not in normalized:
+            return None, per_agent
+        working, cost, meeting_per_agent = apply_schedule(
+            working,
+            meeting,
+            normalized[meeting_id],
+        )
+        if cost is None:
+            return None, per_agent
+        total += cost
+        for agent_id, agent_cost in enumerate(meeting_per_agent):
+            per_agent[agent_id] += int(agent_cost)
+    return total, per_agent

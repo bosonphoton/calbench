@@ -8,7 +8,7 @@ summary_output: tasks/calbench_72_varied_summary.json
 seed_base: 420000
 candidates_per_config: 100
 selected_per_bucket: 4
-difficulty_scorer: optimal_cost_per_participant_slot
+difficulty_scorer: cp_sat_solvable_assignment_fraction
 configs:
   - total_agents: 5
     subset_size: 3

@@ -57,11 +57,15 @@ class CalendarEvent:
 
     @property
     def dm_content(self) -> Optional[str]:
-        return self.data.get("content") if self.type in {"dm_sent", "groupchat_sent"} else None
+        return (
+            self.data.get("content")
+            if self.type in {"dm_sent", "groupchat_sent", "participant_groupchat_sent", "all_groupchat_sent"}
+            else None
+        )
 
     @property
     def dm_content_chars(self) -> int:
-        if self.type not in {"dm_sent", "groupchat_sent"}:
+        if self.type not in {"dm_sent", "groupchat_sent", "participant_groupchat_sent", "all_groupchat_sent"}:
             return 0
         if "content_chars" in self.data:
             return int(self.data.get("content_chars") or 0)
@@ -144,7 +148,10 @@ class CalendarRound:
 
     @property
     def dms(self) -> list[CalendarEvent]:
-        return [e for e in self.events if e.type == "dm_sent"]
+        return [
+            e for e in self.events
+            if e.type in {"dm_sent", "groupchat_sent", "participant_groupchat_sent", "all_groupchat_sent"}
+        ]
 
     @property
     def num_dms(self) -> int:
@@ -281,7 +288,22 @@ class CalendarGame:
 
     @property
     def total_groupchat_messages(self) -> int:
-        return int(self.metrics.get("total_groupchat_messages_sent", 0) or 0)
+        return int(
+            self.metrics.get(
+                "total_groupchat_messages_sent",
+                int(self.metrics.get("total_participant_groupchat_messages_sent", 0) or 0)
+                + int(self.metrics.get("total_all_groupchat_messages_sent", 0) or 0),
+            )
+            or 0
+        )
+
+    @property
+    def total_participant_groupchat_messages(self) -> int:
+        return int(self.metrics.get("total_participant_groupchat_messages_sent", 0) or 0)
+
+    @property
+    def total_all_groupchat_messages(self) -> int:
+        return int(self.metrics.get("total_all_groupchat_messages_sent", 0) or 0)
 
     @property
     def total_cheap_talk_messages(self) -> int:
@@ -356,6 +378,14 @@ class CalendarGame:
     @property
     def per_agent_fallback_cost(self) -> list[float]:
         return self.raw.get("final_state", {}).get("per_agent_fallback_cost", [])
+
+    @property
+    def oracle_per_agent_cost(self) -> list[float]:
+        return self.raw.get("final_state", {}).get("oracle_per_agent_cost", [])
+
+    @property
+    def per_agent_excess_burden(self) -> list[float]:
+        return self.raw.get("final_state", {}).get("per_agent_excess_burden", [])
 
     @property
     def contribution_scores(self) -> list[dict[str, Any]]:
@@ -476,6 +506,8 @@ class CalendarGameDataset:
                 # RQ2: efficiency
                 "total_dms": g.total_dms,
                 "total_groupchat_messages": g.total_groupchat_messages,
+                "total_participant_groupchat_messages": g.total_participant_groupchat_messages,
+                "total_all_groupchat_messages": g.total_all_groupchat_messages,
                 "total_cheap_talk_messages": g.total_cheap_talk_messages,
                 "msgs_per_meeting": g.msgs_per_meeting,
                 "total_dm_chars": g.total_dm_chars,
@@ -541,6 +573,18 @@ class CalendarGameDataset:
                     "agent_type": atype,
                     "cost": float(cost),
                     "fallback_cost": float(fallback),
+                    "oracle_cost": contribution.get(
+                        "oracle_cost",
+                        g.oracle_per_agent_cost[i]
+                        if i < len(g.oracle_per_agent_cost)
+                        else float("nan"),
+                    ),
+                    "excess_burden": contribution.get(
+                        "excess_burden",
+                        g.per_agent_excess_burden[i]
+                        if i < len(g.per_agent_excess_burden)
+                        else float("nan"),
+                    ),
                     "cost_share": float(cost) / total if total > 0 else float("nan"),
                     "calendar_density": contribution.get(
                         "calendar_density",
@@ -571,13 +615,13 @@ class CalendarGameDataset:
         for g in self.games:
             game_meta = self._game_meta(g)
             for e in g.events:
-                if e.type not in {"dm_sent", "groupchat_sent"}:
+                if e.type not in {"dm_sent", "groupchat_sent", "participant_groupchat_sent", "all_groupchat_sent"}:
                     continue
                 rows.append({
                     **game_meta,
                     "round_number": e.round,
                     "turn": e.turn,
-                    "channel": e.data.get("channel", "dm" if e.type == "dm_sent" else "groupchat"),
+                    "channel": e.data.get("channel", "dm" if e.type == "dm_sent" else e.type.removesuffix("_sent")),
                     "from_agent": e.from_agent,
                     "to_agent": e.to_agent,
                     "to_agents": e.data.get("to_agents"),

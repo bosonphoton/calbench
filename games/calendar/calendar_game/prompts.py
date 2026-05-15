@@ -122,34 +122,57 @@ Do NOT include any text outside the JSON object.
 
 
 def _cheap_talk_tool_spec(communication_protocol: str) -> str:
-    protocol = communication_protocol.lower()
-    if protocol == "groupchat":
-        return """{"type": "groupchat", "content": "<message string>"}
-  - Send a message to the task groupchat. All agents can read it before their next turn.
-  - You may send multiple groupchat messages per CHEAP_TALK turn."""
-    if protocol == "dm_and_groupchat":
-        return """{"type": "dm", "to": <agent_id (int)>, "content": "<message string>"}
-  - Send a direct message to another agent about a specific meeting.
-
-{"type": "groupchat", "content": "<message string>"}
-  - Send a message to the task groupchat. All agents can read it before their next turn.
-  - You may send multiple communication actions per CHEAP_TALK turn."""
-    return """{"type": "dm", "to": <agent_id (int)>, "content": "<message string>"}
-  - Send a direct message to another agent about a specific meeting.
-  - You may send multiple DMs per CHEAP_TALK turn.
-  - Messages are delivered before the next turn."""
+    channels = _communication_channels(communication_protocol)
+    specs: list[str] = []
+    if "dm" in channels:
+        specs.append("""{"type": "dm", "to": <agent_id (int)>, "content": "<message string>"}
+  - Send a private direct message to exactly one agent about this meeting.""")
+    if "participant_groupchat" in channels:
+        specs.append("""{"type": "participant_groupchat", "content": "<message string>"}
+  - Send a message visible only to current meeting participants.""")
+    if "all_groupchat" in channels:
+        specs.append("""{"type": "all_groupchat", "content": "<message string>"}
+  - Send a message visible to every agent in the task, including non-participants.""")
+    return "\n\n".join(specs) + "\n  - You may send multiple communication actions per CHEAP_TALK turn."
 
 
 def _response_format_example(communication_protocol: str) -> str:
-    if communication_protocol.lower() == "groupchat":
+    channels = _communication_channels(communication_protocol)
+    if "participant_groupchat" in channels:
         return """{
   "thinking": "Slot 2 is free for me and seems worth proposing to the group.",
-  "actions": [{"type": "groupchat", "content": "Slot 2 works for me."}]
+  "actions": [{"type": "participant_groupchat", "content": "Slot 2 works for me."}]
+}"""
+    if "all_groupchat" in channels:
+        return """{
+  "thinking": "Slot 2 is free for me and seems worth proposing to everyone.",
+  "actions": [{"type": "all_groupchat", "content": "Slot 2 works for me."}]
 }"""
     return """{
   "thinking": "Agent 1 suggested slot 5 but I have an errand there. Slot 2 is free for both of us.",
   "actions": [{"type": "dm", "to": 1, "content": "Let's use slot 2."}]
 }"""
+
+
+def _communication_channels(communication_protocol: str) -> set[str]:
+    protocol = str(communication_protocol or "dm").lower()
+    aliases = {
+        "dm": {"dm"},
+        "direct": {"dm"},
+        "groupchat": {"all_groupchat"},
+        "group_chat": {"all_groupchat"},
+        "participant_groupchat": {"participant_groupchat"},
+        "meeting_groupchat": {"participant_groupchat"},
+        "all_groupchat": {"all_groupchat"},
+        "all_agent_groupchat": {"all_groupchat"},
+        "dm_and_groupchat": {"dm", "all_groupchat"},
+        "dm_and_all_groupchat": {"dm", "all_groupchat"},
+        "dm_and_participant_groupchat": {"dm", "participant_groupchat"},
+        "all": {"dm", "participant_groupchat", "all_groupchat"},
+    }
+    if "+" in protocol:
+        return {part for part in protocol.split("+") if part}
+    return aliases.get(protocol, {protocol})
 
 
 def _resolve_prompt_variant(variant_name: str | None, variant_dir: str | None = None) -> Path:
@@ -206,12 +229,15 @@ def _turn_budget_text(turn_index: int | None, max_turns_per_round: int | None) -
 
 
 def _cheap_talk_action_text(communication_protocol: str) -> str:
-    protocol = communication_protocol.lower()
-    if protocol == "groupchat":
-        return 'Only the "groupchat" tool is valid right now.'
-    if protocol == "dm_and_groupchat":
-        return 'Only the "dm" and "groupchat" tools are valid right now.'
-    return 'Only the "dm" tool is valid right now.'
+    channels = _communication_channels(communication_protocol)
+    names = []
+    if "dm" in channels:
+        names.append('"dm"')
+    if "participant_groupchat" in channels:
+        names.append('"participant_groupchat"')
+    if "all_groupchat" in channels:
+        names.append('"all_groupchat"')
+    return f"Only the {', '.join(names)} tool(s) are valid right now."
 
 
 def build_round_start_message(
@@ -282,7 +308,12 @@ def build_turn_message(
     lines = ["New messages received:\n"]
     for i, msg in enumerate(messages, start=1):
         channel = msg.get("channel", "dm")
-        prefix = "Groupchat" if channel == "groupchat" else "DM"
+        prefix = {
+            "dm": "Private DM",
+            "participant_groupchat": "Participant groupchat",
+            "all_groupchat": "All-agent groupchat",
+            "groupchat": "Groupchat",
+        }.get(channel, str(channel))
         lines.append(f"  [{i}] {prefix} from Agent {msg['from']} (meeting {msg['meeting_id']}): {msg['content']}")
     lines.append(
         f"\n{_turn_budget_text(turn_index, max_turns_per_round)}"

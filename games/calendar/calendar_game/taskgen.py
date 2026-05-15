@@ -6,6 +6,7 @@ import argparse
 from copy import deepcopy
 from itertools import product
 import json
+import math
 import random
 from pathlib import Path
 from typing import Any, Callable
@@ -13,7 +14,12 @@ from typing import Any, Callable
 import yaml
 
 from calendar_game.scenario import generate_scenario
-from calendar_game.solver import apply_schedule, solve_greedy, solve_optimal
+from calendar_game.solver import (
+    apply_schedule,
+    count_feasible_assignments_cp_sat,
+    solve_greedy,
+    solve_optimal,
+)
 
 TASK_SCHEMA_VERSION = 1
 NUM_SLOTS = 16
@@ -45,7 +51,7 @@ COST_RATIO_MULTIPLIERS = [2, 3, 4]
 INITIAL_PRIOR_MEETING_MULTIPLIERS = [5, 10, 20, 100]
 BALANCED_UNIFORM_SOURCE = "tasks/balanced_uniform_cost_v1.jsonl"
 DIFFICULTY_BUCKETS = ["easy", "medium", "hard"]
-DEFAULT_DIFFICULTY_SCORER = "optimal_cost_per_participant_slot"
+DEFAULT_DIFFICULTY_SCORER = "cp_sat_solvable_assignment_fraction"
 DIFFICULTY_SCORER_DESCRIPTIONS = {
     "optimal_cost_per_participant_slot": (
         "optimal total move cost divided by total participant-slots "
@@ -56,9 +62,14 @@ DIFFICULTY_SCORER_DESCRIPTIONS = {
         "across all meetings"
     ),
     "optimal_cost_per_total_agent": "optimal total move cost divided by total agents",
+    "cp_sat_solvable_assignment_fraction": (
+        "fraction of ordered distinct meeting-slot assignments that satisfy "
+        "the CP-SAT feasibility constraints; lower fractions are harder"
+    ),
 }
 
 DifficultyScorer = Callable[[dict[str, Any]], float]
+DIFFICULTY_SCORER_LOWER_IS_HARDER = {"cp_sat_solvable_assignment_fraction"}
 
 INITIAL_SMALL_TASKS: list[dict[str, Any]] = [
     {"task_id": "t001_easy_2a_2p_sparse_flat", "seed": 1001, "total_agents": 2, "subset_size": 2, "density": 0.3, "pref_level": 1},
@@ -260,11 +271,60 @@ def optimal_cost_per_total_agent(task: dict[str, Any]) -> float:
     return float(task["optimal"]["cost"]) / int(task["params"]["total_agents"])
 
 
+def count_solvable_assignments(task: dict[str, Any]) -> tuple[int, int, float]:
+    """Count CP-SAT-feasible ordered distinct meeting-slot assignments.
+
+    The denominator is ``num_slots! / (num_slots - num_meetings)!``. The
+    numerator counts assignments in that same no-slot-reuse space by asking
+    the CP-SAT feasibility model to enumerate all valid solutions.
+    """
+    calendars = task["calendars"]
+    meetings = task["meetings"]
+    num_slots = int(task["params"]["num_slots"])
+    num_meetings = len(meetings)
+    if num_meetings > num_slots:
+        return 0, 0, 0.0
+    total_assignments = math.factorial(num_slots) // math.factorial(num_slots - num_meetings)
+    if total_assignments <= 0:
+        return 0, 0, 0.0
+
+    solvable_assignments = count_feasible_assignments_cp_sat(
+        calendars,
+        meetings,
+        num_slots,
+        require_distinct_slots=True,
+    )
+    return solvable_assignments, total_assignments, solvable_assignments / total_assignments
+
+
+def cp_sat_solvable_assignment_fraction(task: dict[str, Any]) -> float:
+    solvable, total, fraction = count_solvable_assignments(task)
+    task["solvable_assignment_count"] = solvable
+    task["total_assignment_count"] = total
+    task["solvable_assignment_fraction"] = fraction
+    return fraction
+
+
 DIFFICULTY_SCORERS: dict[str, DifficultyScorer] = {
+    "cp_sat_solvable_assignment_fraction": cp_sat_solvable_assignment_fraction,
     "optimal_cost_per_total_agent": optimal_cost_per_total_agent,
     "optimal_cost_per_participant_slot": optimal_cost_per_participant_slot,
     "optimal_evictions_per_participant_slot": optimal_evictions_per_participant_slot,
 }
+
+
+def difficulty_score_sort_value(task: dict[str, Any], scorer_name: str | None = None) -> float:
+    scorer = scorer_name or str(task.get("difficulty_scorer", DEFAULT_DIFFICULTY_SCORER))
+    score = float(task["difficulty_score"])
+    return -score if scorer in DIFFICULTY_SCORER_LOWER_IS_HARDER else score
+
+
+def normalized_difficulty_value(score: float, min_score: float, max_score: float, scorer_name: str) -> float:
+    if max_score == min_score:
+        return 0.0
+    if scorer_name in DIFFICULTY_SCORER_LOWER_IS_HARDER:
+        return (max_score - score) / (max_score - min_score)
+    return (score - min_score) / (max_score - min_score)
 
 
 def score_task_difficulty(task: dict[str, Any], scorer_name: str = DEFAULT_DIFFICULTY_SCORER) -> dict[str, Any]:
@@ -996,7 +1056,7 @@ def assign_tertile_difficulty_buckets(tasks: list[dict[str, Any]]) -> None:
     ranked = sorted(
         tasks,
         key=lambda task: (
-            float(task["difficulty_score"]),
+            difficulty_score_sort_value(task),
             int(task.get("optimal_evictions", 0)),
             int(task["seed"]),
         ),
@@ -1122,7 +1182,7 @@ def build_balanced_tasks_for_configs(
     skip_optimal: bool = False,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     if skip_optimal:
-        raise ValueError("--skip-optimal cannot be used with balanced suites: difficulty bucketing requires the optimal solver")
+        raise ValueError("--skip-optimal cannot be used with balanced suites: difficulty bucketing requires scored tasks")
     tasks: list[dict[str, Any]] = []
     summary: dict[str, Any] = {
         "setting": setting_name,
@@ -1156,15 +1216,18 @@ def build_balanced_tasks_for_configs(
         score_is_degenerate = max_score == min_score
         for task in candidates:
             score = float(task["difficulty_score"])
-            task["config_normalized_difficulty"] = (
-                0.0 if score_is_degenerate else (score - min_score) / (max_score - min_score)
+            task["config_normalized_difficulty"] = normalized_difficulty_value(
+                score,
+                min_score,
+                max_score,
+                difficulty_scorer,
             )
             task["config_difficulty_degenerate"] = score_is_degenerate
 
         ranked = sorted(
             candidates,
             key=lambda task: (
-                task["difficulty_score"],
+                difficulty_score_sort_value(task, difficulty_scorer),
                 task["optimal_evictions"],
                 task["seed"],
             ),
@@ -1232,7 +1295,7 @@ def build_balanced_tasks(
     skip_optimal: bool = False,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     if skip_optimal:
-        raise ValueError("--skip-optimal cannot be used with balanced suites: difficulty bucketing requires the optimal solver")
+        raise ValueError("--skip-optimal cannot be used with balanced suites: difficulty bucketing requires scored tasks")
     pref_levels = pref_levels or BALANCED_PREF_LEVEL_VALUES
     tasks: list[dict[str, Any]] = []
     summary: dict[str, Any] = {
@@ -1270,15 +1333,18 @@ def build_balanced_tasks(
         score_is_degenerate = max_score == min_score
         for task in candidates:
             score = float(task["difficulty_score"])
-            task["config_normalized_difficulty"] = (
-                0.0 if score_is_degenerate else (score - min_score) / (max_score - min_score)
+            task["config_normalized_difficulty"] = normalized_difficulty_value(
+                score,
+                min_score,
+                max_score,
+                difficulty_scorer,
             )
             task["config_difficulty_degenerate"] = score_is_degenerate
 
         ranked = sorted(
             candidates,
             key=lambda task: (
-                task["difficulty_score"],
+                difficulty_score_sort_value(task, difficulty_scorer),
                 task["optimal_evictions"],
                 task["seed"],
             ),
@@ -1424,7 +1490,7 @@ def build_tasks_from_config(
 
     The config intentionally mirrors the public suite builder: each concrete
     cell generates many candidate tasks, buckets them into easy/medium/hard by
-    oracle difficulty, and selects a fixed number per bucket.
+    the configured difficulty scorer, and selects a fixed number per bucket.
     """
     default_keys = {
         "total_agents",
@@ -1496,8 +1562,11 @@ def assign_setting_normalized_difficulty(tasks: list[dict[str, Any]]) -> None:
     max_score = max(scores)
     for task in tasks:
         score = float(task["difficulty_score"])
-        task["setting_normalized_difficulty"] = (
-            0.0 if max_score == min_score else (score - min_score) / (max_score - min_score)
+        task["setting_normalized_difficulty"] = normalized_difficulty_value(
+            score,
+            min_score,
+            max_score,
+            str(task.get("difficulty_scorer", DEFAULT_DIFFICULTY_SCORER)),
         )
 
 

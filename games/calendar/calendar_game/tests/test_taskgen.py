@@ -1,4 +1,83 @@
-from calendar_game.taskgen import build_task, build_tasks_from_config, derive_blocked_errand_task
+from calendar_game.taskgen import (
+    build_task,
+    build_tasks_from_config,
+    count_solvable_assignments,
+    derive_blocked_errand_task,
+)
+
+
+def test_count_solvable_assignments_uses_feasible_fraction():
+    task = {
+        "task_id": "manual_fraction",
+        "params": {
+            "num_slots": 3,
+        },
+        "calendars": [
+            [None, {"errand_id": 1, "cost": 1}, {"errand_id": 2, "cost": 1, "blocked": True}],
+            [None, None, None],
+        ],
+        "meetings": [
+            {"id": 1, "participants": [0, 1], "duration": 1, "cost": 1},
+        ],
+    }
+
+    solvable, total, fraction = count_solvable_assignments(task)
+
+    assert solvable == 2
+    assert total == 3
+    assert fraction == 2 / 3
+
+
+def test_count_solvable_assignments_uses_ordered_distinct_denominator():
+    task = {
+        "task_id": "manual_permutation_denominator",
+        "params": {
+            "num_slots": 3,
+        },
+        "calendars": [
+            [None, None, {"errand_id": 1, "cost": 1, "blocked": True}],
+            [None, None, None],
+        ],
+        "meetings": [
+            {"id": 1, "participants": [0], "duration": 1, "cost": 1},
+            {"id": 2, "participants": [1], "duration": 1, "cost": 1},
+        ],
+    }
+
+    solvable, total, fraction = count_solvable_assignments(task)
+
+    assert solvable == 4
+    assert total == 6
+    assert fraction == 4 / 6
+
+
+def test_solvable_fraction_scorer_buckets_lower_fraction_as_harder():
+    config = {
+        "setting_name": "fraction_bucket_smoke",
+        "seed_base": 710_000,
+        "candidates_per_config": 6,
+        "selected_per_bucket": 1,
+        "difficulty_scorer": "cp_sat_solvable_assignment_fraction",
+        "configs": [
+            {
+                "total_agents": 3,
+                "subset_size": 2,
+                "num_slots": 8,
+                "num_meetings": 2,
+                "density": 0.6,
+                "pref_level": 1,
+                "meeting_cost_level": 1,
+                "errand_cost_level": 1,
+            }
+        ],
+    }
+
+    tasks, _summary = build_tasks_from_config(config)
+    by_bucket = {task["difficulty"]: task for task in tasks}
+
+    assert by_bucket["easy"]["difficulty_score"] >= by_bucket["medium"]["difficulty_score"]
+    assert by_bucket["medium"]["difficulty_score"] >= by_bucket["hard"]["difficulty_score"]
+    assert all("solvable_assignment_fraction" in task for task in tasks)
 
 
 def test_derive_blocked_errand_task_remains_feasible():

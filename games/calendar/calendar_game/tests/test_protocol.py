@@ -123,9 +123,10 @@ class OneShotDMClient(BaseClient):
 
 class OneShotGroupchatFixedSlotClient(BaseClient):
     """Optionally sends one groupchat message, records inboxes, then schedules a fixed slot."""
-    def __init__(self, slot: int, content: str | None = None):
+    def __init__(self, slot: int, content: str | None = None, channel: str = "all_groupchat"):
         self.slot = slot
         self.content = content
+        self.channel = channel
         self.sent = False
         self.meeting_id = 1
         self.received_messages: list[dict] = []
@@ -143,13 +144,59 @@ class OneShotGroupchatFixedSlotClient(BaseClient):
             self.sent = True
             return TurnResult(
                 tool_calls=[{
-                    "type": "groupchat",
+                    "type": self.channel,
                     "meeting_id": self.meeting_id,
                     "content": self.content,
                 }],
                 text=None, thinking=None, usage=None, latency_ms=None, raw=None,
             )
         return TurnResult(tool_calls=[], text=None, thinking=None, usage=None, latency_ms=None, raw=None)
+
+    def decide(self, meeting: dict, calendar_render: str) -> DecideResult:
+        return DecideResult(
+            tool_calls=[{"type": "schedule", "meeting_id": meeting["id"], "slot": self.slot}],
+            text=None, thinking=None, usage=None, latency_ms=None, raw=None,
+        )
+
+    def retry_decide(self, attempt: int, max_attempts: int, conflict: str) -> DecideResult:
+        return self.decide({"id": self.meeting_id}, "")
+
+
+class OneShotMixedChatFixedSlotClient(BaseClient):
+    """Sends both groupchat and DM messages once, records inboxes, then schedules a fixed slot."""
+    def __init__(self, slot: int, dm_target: int | None = None, groupchat_channel: str = "all_groupchat"):
+        self.slot = slot
+        self.dm_target = dm_target
+        self.groupchat_channel = groupchat_channel
+        self.sent = False
+        self.meeting_id = 1
+        self.received_messages: list[dict] = []
+
+    def register(self, agent_id: int, game_config: GameConfig) -> None:
+        self.agent_id = agent_id
+
+    def start_round(self, meeting: dict, calendar_render: str, round_num: int) -> None:
+        self.meeting_id = meeting["id"]
+        self.sent = False
+
+    def turn(self, messages: list[dict], turn_index: int | None = None, max_turns_per_round: int | None = None) -> TurnResult:
+        self.received_messages.extend(messages)
+        if self.sent:
+            return TurnResult(tool_calls=[], text=None, thinking=None, usage=None, latency_ms=None, raw=None)
+        self.sent = True
+        tool_calls = [{
+            "type": self.groupchat_channel,
+            "meeting_id": self.meeting_id,
+            "content": "Group proposal: slot 0 works for me.",
+        }]
+        if self.dm_target is not None:
+            tool_calls.append({
+                "type": "dm",
+                "to": self.dm_target,
+                "meeting_id": self.meeting_id,
+                "content": "Private note: I can also do slot 0.",
+            })
+        return TurnResult(tool_calls=tool_calls, text=None, thinking=None, usage=None, latency_ms=None, raw=None)
 
     def decide(self, meeting: dict, calendar_render: str) -> DecideResult:
         return DecideResult(
@@ -212,6 +259,34 @@ class FixedSlotClient(BaseClient):
 
     def retry_decide(self, attempt: int, max_attempts: int, conflict: str) -> DecideResult:
         return self.decide({}, "")
+
+
+class FixedBatchClient(BaseClient):
+    """Submits the same decision batch for the current meeting."""
+    def __init__(self, actions: list[dict]):
+        self.actions = actions
+        self.meeting_id = 1
+
+    def register(self, agent_id: int, game_config: GameConfig) -> None:
+        pass
+
+    def start_round(self, meeting: dict, calendar_render: str, round_num: int) -> None:
+        self.meeting_id = meeting["id"]
+
+    def turn(self, messages: list[dict], turn_index: int | None = None, max_turns_per_round: int | None = None) -> TurnResult:
+        return TurnResult(tool_calls=[], text=None, thinking=None, usage=None, latency_ms=None, raw=None)
+
+    def decide(self, meeting: dict, calendar_render: str) -> DecideResult:
+        actions = [
+            {**action, "meeting_id": self.meeting_id}
+            if action.get("type") == "schedule"
+            else action
+            for action in self.actions
+        ]
+        return DecideResult(tool_calls=actions, text=None, thinking=None, usage=None, latency_ms=None, raw=None)
+
+    def retry_decide(self, attempt: int, max_attempts: int, conflict: str) -> DecideResult:
+        return self.decide({"id": self.meeting_id}, "")
 
 
 class MalformedToolClient(BaseClient):
@@ -652,17 +727,181 @@ def test_groupchat_protocol_delivers_messages_to_all_task_agents_and_scores_mixe
 
     trace = game._run_with_agents(agents, scenario)
 
-    groupchat_events = events_of_type(trace, "groupchat_sent")
+    groupchat_events = events_of_type(trace, "all_groupchat_sent")
     assert len(groupchat_events) == 1
     assert groupchat_events[0]["data"]["to_agents"] == [1, 2]
-    assert clients[1].received_messages[0]["channel"] == "groupchat"
+    assert clients[1].received_messages[0]["channel"] == "all_groupchat"
     assert clients[2].received_messages[0]["content"] == "slot 0 works for me"
     assert trace.metrics["total_groupchat_messages_sent"] == 1
+    assert trace.metrics["total_all_groupchat_messages_sent"] == 1
     assert trace.metrics["total_dms_sent"] == 0
     assert trace.metrics["is_heterogeneous_team"] is True
     assert trace.metrics["team_model_counts"] == {"model-a": 1, "model-b": 2}
     assert len(trace.final_state["contribution_scores"]) == 3
     assert trace.final_state["contribution_scores"][0]["model"] == "model-a"
+
+
+def test_dm_and_groupchat_protocol_allows_both_message_types():
+    config = CalendarGameConfig(
+        seed=1,
+        num_agents=3,
+        num_slots=4,
+        num_meetings=1,
+        communication_protocol="dm_and_groupchat",
+        max_turns_per_round=2,
+        enable_fallback=False,
+    )
+    game = CalendarGame(config, dry_run=True)
+    scenario = {
+        "seed": 1,
+        "num_agents": 3,
+        "num_slots": 4,
+        "calendars": [[None, None, None, None] for _ in range(3)],
+        "meetings": [{
+            "id": 1,
+            "participants": [0, 1, 2],
+            "speaker_order": [0, 1, 2],
+            "duration": 1,
+            "cost": 1,
+        }],
+        "optimal": {"cost": 0, "assignments": {"1": 0}},
+        "greedy": {"cost": 0, "assignments": {"1": 0}},
+        "feasible": True,
+    }
+    clients = [
+        OneShotMixedChatFixedSlotClient(0, dm_target=1),
+        OneShotMixedChatFixedSlotClient(0),
+        OneShotMixedChatFixedSlotClient(0),
+    ]
+    agents: list[Agent] = []
+    for agent_id, client in enumerate(clients):
+        agent = Agent(client)
+        cal = Calendar(config.num_slots)
+        cal.slots = list(scenario["calendars"][agent_id])
+        agent.calendar = cal
+        agents.append(agent)
+
+    trace = game._run_with_agents(agents, scenario)
+
+    groupchat_events = events_of_type(trace, "all_groupchat_sent")
+    dm_events = events_of_type(trace, "dm_sent")
+    assert len(groupchat_events) == 3
+    assert len(dm_events) == 1
+    assert trace.metrics["total_groupchat_messages_sent"] == 3
+    assert trace.metrics["total_dms_sent"] == 1
+    assert any(message["channel"] == "all_groupchat" for message in clients[1].received_messages)
+    assert any(message["channel"] == "dm" for message in clients[1].received_messages)
+    assert trace.metrics["total_cheap_talk_messages"] == 4
+
+
+def test_participant_groupchat_reaches_only_meeting_participants():
+    config = CalendarGameConfig(
+        seed=1,
+        num_agents=3,
+        num_slots=4,
+        num_meetings=1,
+        communication_protocol="participant_groupchat",
+        max_turns_per_round=2,
+        enable_fallback=False,
+    )
+    game = CalendarGame(config, dry_run=True)
+    scenario = {
+        "seed": 1,
+        "num_agents": 3,
+        "num_slots": 4,
+        "calendars": [[None, None, None, None] for _ in range(3)],
+        "meetings": [{
+            "id": 1,
+            "participants": [0, 1],
+            "speaker_order": [0, 1],
+            "duration": 1,
+            "cost": 1,
+        }],
+        "optimal": {"cost": 0, "assignments": {"1": 0}},
+        "greedy": {"cost": 0, "assignments": {"1": 0}},
+        "feasible": True,
+    }
+    clients = [
+        OneShotGroupchatFixedSlotClient(
+            0,
+            content="participant-only slot 0 proposal",
+            channel="participant_groupchat",
+        ),
+        OneShotGroupchatFixedSlotClient(0, channel="participant_groupchat"),
+        OneShotGroupchatFixedSlotClient(0, channel="participant_groupchat"),
+    ]
+    agents: list[Agent] = []
+    for agent_id, client in enumerate(clients):
+        agent = Agent(client)
+        cal = Calendar(config.num_slots)
+        cal.slots = list(scenario["calendars"][agent_id])
+        agent.calendar = cal
+        agents.append(agent)
+
+    trace = game._run_with_agents(agents, scenario)
+
+    participant_events = events_of_type(trace, "participant_groupchat_sent")
+    assert len(participant_events) == 1
+    assert participant_events[0]["data"]["to_agents"] == [1]
+    assert clients[1].received_messages[0]["channel"] == "participant_groupchat"
+    assert clients[2].received_messages == []
+    assert trace.metrics["total_participant_groupchat_messages_sent"] == 1
+    assert trace.metrics["total_all_groupchat_messages_sent"] == 0
+
+
+def test_trace_records_per_agent_oracle_cost_and_excess_burden():
+    config = CalendarGameConfig(
+        seed=1,
+        num_agents=2,
+        num_slots=3,
+        num_meetings=1,
+        max_turns_per_round=1,
+        enable_fallback=False,
+    )
+    game = CalendarGame(config, dry_run=True)
+    scenario = {
+        "seed": 1,
+        "num_agents": 2,
+        "num_slots": 3,
+        "calendars": [
+            [None, None, None],
+            [{"errand_id": 10, "cost": 4}, None, None],
+        ],
+        "meetings": [{
+            "id": 1,
+            "participants": [0, 1],
+            "speaker_order": [0, 1],
+            "duration": 1,
+            "cost": 1,
+        }],
+        "optimal": {"cost": 0, "assignments": {"1": 1}},
+        "greedy": {"cost": 4, "assignments": {"1": 0}},
+        "feasible": True,
+    }
+    clients: list[BaseClient] = [
+        FixedBatchClient([{"type": "schedule", "slot": 0}]),
+        FixedBatchClient([
+            {"type": "reschedule", "item_id": 10, "from_slot": 0, "to_slot": 2},
+            {"type": "schedule", "slot": 0},
+        ]),
+    ]
+    agents: list[Agent] = []
+    for agent_id, client in enumerate(clients):
+        agent = Agent(client)
+        cal = Calendar(config.num_slots)
+        cal.slots = list(scenario["calendars"][agent_id])
+        agent.calendar = cal
+        agents.append(agent)
+
+    trace = game._run_with_agents(agents, scenario)
+
+    assert trace.metrics["realized_cost"] == 4
+    assert trace.metrics["optimal_cost"] == 0
+    assert trace.final_state["per_agent_cost"] == [0, 4]
+    assert trace.final_state["oracle_per_agent_cost"] == [0, 0]
+    assert trace.final_state["per_agent_excess_burden"] == [0, 4]
+    assert trace.metrics["total_excess_burden"] == 4
+    assert trace.final_state["contribution_scores"][1]["excess_burden"] == 4
 
 
 def test_phase_ordering():
